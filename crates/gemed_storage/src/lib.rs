@@ -8,6 +8,7 @@ pub const PROJECT_SCHEMA_VERSION: u8 = 1;
 pub const PROJECT_MANIFEST_FILE: &str = "gemed-project.json";
 pub const PROJECT_WORKFLOW_FILE: &str = "workflow.json";
 pub const PROJECT_MEDIA_DIR: &str = "media";
+pub const PROJECT_MEDIA_URL_PREFIX: &str = "gemed-media://";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +17,8 @@ pub struct WorkflowProjectManifest {
     pub name: String,
     pub workflow_file: String,
     pub media_dir: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_files: Vec<String>,
 }
 
 impl WorkflowProjectManifest {
@@ -25,6 +28,7 @@ impl WorkflowProjectManifest {
             name: workflow.name.clone(),
             workflow_file: PROJECT_WORKFLOW_FILE.to_string(),
             media_dir: PROJECT_MEDIA_DIR.to_string(),
+            media_files: Vec::new(),
         }
     }
 }
@@ -133,12 +137,14 @@ impl WorkflowStorage for MemoryWorkflowStorage {
 #[cfg(feature = "desktop")]
 pub mod desktop {
     use super::{
-        DEFAULT_AUTOSAVE_SLOT, PROJECT_MANIFEST_FILE, PROJECT_MEDIA_DIR, PROJECT_WORKFLOW_FILE,
-        Result, StorageError, WorkflowProjectManifest, WorkflowSnapshot, WorkflowStorage,
-        normalize_slot,
+        DEFAULT_AUTOSAVE_SLOT, PROJECT_MANIFEST_FILE, PROJECT_MEDIA_DIR, PROJECT_MEDIA_URL_PREFIX,
+        PROJECT_WORKFLOW_FILE, Result, StorageError, WorkflowProjectManifest, WorkflowSnapshot,
+        WorkflowStorage, normalize_slot,
     };
+    use base64::{Engine as _, engine::general_purpose};
     use directories::ProjectDirs;
     use gemed_core::WorkflowFile;
+    use serde_json::Value;
     use std::path::{Component, Path, PathBuf};
 
     #[derive(Debug, Clone)]
@@ -292,8 +298,11 @@ pub mod desktop {
                 }
             })?;
 
-            let manifest = WorkflowProjectManifest::from_workflow(workflow);
-            let workflow_json = workflow.to_pretty_json()?;
+            let media_dir = self.default_media_dir();
+            let (workflow_json, media_files) =
+                externalize_workflow_media_json(workflow, &media_dir)?;
+            let mut manifest = WorkflowProjectManifest::from_workflow(workflow);
+            manifest.media_files = media_files;
             std::fs::write(self.default_workflow_path(), workflow_json.as_bytes()).map_err(
                 |source| StorageError::Io {
                     path: self.default_workflow_path(),
@@ -337,6 +346,7 @@ pub mod desktop {
                     name: String::new(),
                     workflow_file: PROJECT_WORKFLOW_FILE.to_string(),
                     media_dir: PROJECT_MEDIA_DIR.to_string(),
+                    media_files: Vec::new(),
                 }
             };
 
@@ -346,7 +356,8 @@ pub mod desktop {
                     path: workflow_path.clone(),
                     source,
                 })?;
-            let workflow = WorkflowFile::from_json_str(&json)?;
+            let hydrated_json = hydrate_workflow_media_json(&self.root, &json)?;
+            let workflow = WorkflowFile::from_json_str(&hydrated_json)?;
             let manifest = if manifest.name.trim().is_empty() {
                 WorkflowProjectManifest {
                     name: workflow.name.clone(),
@@ -362,6 +373,210 @@ pub mod desktop {
                 manifest,
                 workflow,
             })
+        }
+    }
+
+    fn externalize_workflow_media_json(
+        workflow: &WorkflowFile,
+        media_dir: &Path,
+    ) -> Result<(String, Vec<String>)> {
+        let mut value = serde_json::to_value(workflow).map_err(|source| {
+            StorageError::Backend(format!("workflow project JSON export failed: {source}"))
+        })?;
+        let mut media_files = Vec::new();
+        externalize_media_value(&mut value, media_dir, &mut media_files)?;
+        media_files.sort();
+        media_files.dedup();
+        let json = serde_json::to_string_pretty(&value).map_err(|source| {
+            StorageError::Backend(format!("workflow project JSON formatting failed: {source}"))
+        })?;
+        Ok((json, media_files))
+    }
+
+    fn externalize_media_value(
+        value: &mut Value,
+        media_dir: &Path,
+        media_files: &mut Vec<String>,
+    ) -> Result<()> {
+        match value {
+            Value::String(text) => {
+                let Some(data_url) = DataUrl::parse(text) else {
+                    return Ok(());
+                };
+                let filename = write_data_url_media(media_dir, &data_url)?;
+                let relative = format!("{PROJECT_MEDIA_DIR}/{filename}");
+                *text = format!("{PROJECT_MEDIA_URL_PREFIX}{relative}");
+                media_files.push(relative);
+                Ok(())
+            }
+            Value::Array(items) => {
+                for item in items {
+                    externalize_media_value(item, media_dir, media_files)?;
+                }
+                Ok(())
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    externalize_media_value(item, media_dir, media_files)?;
+                }
+                Ok(())
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        }
+    }
+
+    fn hydrate_workflow_media_json(root: &Path, json: &str) -> Result<String> {
+        let mut value: Value = serde_json::from_str(json).map_err(|source| {
+            StorageError::Backend(format!("workflow JSON parse failed: {source}"))
+        })?;
+        hydrate_media_value(root, &mut value)?;
+        serde_json::to_string_pretty(&value).map_err(|source| {
+            StorageError::Backend(format!(
+                "workflow JSON hydration formatting failed: {source}"
+            ))
+        })
+    }
+
+    fn hydrate_media_value(root: &Path, value: &mut Value) -> Result<()> {
+        match value {
+            Value::String(text) => {
+                let Some(relative) = text.strip_prefix(PROJECT_MEDIA_URL_PREFIX) else {
+                    return Ok(());
+                };
+                let path = safe_project_child(root, relative)?;
+                let bytes = std::fs::read(&path).map_err(|source| StorageError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let mime = mime_from_path(&path);
+                let encoded = general_purpose::STANDARD.encode(bytes);
+                *text = format!("data:{mime};base64,{encoded}");
+                Ok(())
+            }
+            Value::Array(items) => {
+                for item in items {
+                    hydrate_media_value(root, item)?;
+                }
+                Ok(())
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    hydrate_media_value(root, item)?;
+                }
+                Ok(())
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        }
+    }
+
+    struct DataUrl {
+        mime: String,
+        bytes: Vec<u8>,
+    }
+
+    impl DataUrl {
+        fn parse(value: &str) -> Option<Self> {
+            let value = value.strip_prefix("data:")?;
+            let (metadata, encoded) = value.split_once(',')?;
+            if !metadata
+                .split(';')
+                .any(|part| part.eq_ignore_ascii_case("base64"))
+            {
+                return None;
+            }
+            let mime = metadata
+                .split(';')
+                .next()
+                .filter(|mime| !mime.trim().is_empty())
+                .unwrap_or("application/octet-stream")
+                .to_ascii_lowercase();
+            let bytes = general_purpose::STANDARD.decode(encoded).ok()?;
+            Some(Self { mime, bytes })
+        }
+    }
+
+    fn write_data_url_media(media_dir: &Path, data_url: &DataUrl) -> Result<String> {
+        std::fs::create_dir_all(media_dir).map_err(|source| StorageError::Io {
+            path: media_dir.to_path_buf(),
+            source,
+        })?;
+        let extension = extension_for_mime(&data_url.mime);
+        let hash = stable_hash(&data_url.bytes);
+        for attempt in 0..=1024 {
+            let filename = if attempt == 0 {
+                format!("media-{hash:016x}.{extension}")
+            } else {
+                format!("media-{hash:016x}-{attempt}.{extension}")
+            };
+            let path = media_dir.join(&filename);
+            if path.exists() {
+                let existing = std::fs::read(&path).map_err(|source| StorageError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                if existing == data_url.bytes {
+                    return Ok(filename);
+                }
+                continue;
+            }
+            std::fs::write(&path, &data_url.bytes)
+                .map_err(|source| StorageError::Io { path, source })?;
+            return Ok(filename);
+        }
+        Err(StorageError::Backend(
+            "could not allocate a unique media filename".to_string(),
+        ))
+    }
+
+    fn stable_hash(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    fn extension_for_mime(mime: &str) -> &'static str {
+        match mime {
+            "image/jpeg" => "jpg",
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/svg+xml" => "svg",
+            "video/mp4" => "mp4",
+            "video/webm" => "webm",
+            "audio/mpeg" => "mp3",
+            "audio/mp3" => "mp3",
+            "audio/wav" | "audio/x-wav" => "wav",
+            "audio/ogg" => "ogg",
+            "model/gltf-binary" => "glb",
+            "model/gltf+json" => "gltf",
+            _ => "bin",
+        }
+    }
+
+    fn mime_from_path(path: &Path) -> &'static str {
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "ogg" => "audio/ogg",
+            "glb" => "model/gltf-binary",
+            "gltf" => "model/gltf+json",
+            _ => "application/octet-stream",
         }
     }
 
@@ -528,6 +743,10 @@ fn normalize_slot(slot: &str) -> Result<String> {
 mod tests {
     use super::*;
     use gemed_core::WorkflowFile;
+    #[cfg(feature = "desktop")]
+    use gemed_core::{NodeType, Position, WorkflowNode};
+    #[cfg(feature = "desktop")]
+    use serde_json::json;
 
     #[test]
     fn memory_storage_round_trips_workflow() {
@@ -632,6 +851,7 @@ mod tests {
                 name: "bad".to_string(),
                 workflow_file: "../workflow.json".to_string(),
                 media_dir: PROJECT_MEDIA_DIR.to_string(),
+                media_files: Vec::new(),
             })
             .unwrap(),
         )
@@ -643,6 +863,43 @@ mod tests {
         assert!(
             matches!(err, StorageError::Backend(message) if message.contains("inside the project directory"))
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_externalizes_and_hydrates_data_url_media() {
+        let media = "data:image/png;base64,aGVsbG8=";
+        let mut workflow = WorkflowFile::blank();
+        workflow.name = "media bundle".to_string();
+        workflow.nodes.push(WorkflowNode::new(
+            "image",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "image": media,
+                "nested": {
+                    "duplicate": media
+                }
+            }),
+        ));
+        let root = unique_temp_dir("gemed-project-media-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let snapshot = project.save(&workflow).expect("save project media");
+
+        assert_eq!(snapshot.manifest.media_files.len(), 1);
+        let media_file = root.join(&snapshot.manifest.media_files[0]);
+        assert!(media_file.is_file());
+        assert_eq!(std::fs::read(&media_file).unwrap(), b"hello");
+        let saved_json = std::fs::read_to_string(root.join(PROJECT_WORKFLOW_FILE)).unwrap();
+        assert!(!saved_json.contains("data:image/png"));
+        assert!(saved_json.contains(PROJECT_MEDIA_URL_PREFIX));
+
+        let loaded = project.load().expect("load project media");
+        assert_eq!(loaded.workflow.nodes[0].data["image"], media);
+        assert_eq!(loaded.workflow.nodes[0].data["nested"]["duplicate"], media);
 
         let _ = std::fs::remove_dir_all(root);
     }

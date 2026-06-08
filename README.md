@@ -22,7 +22,7 @@ Implemented now:
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
-- Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and a reserved `media/` directory
+- Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with data URL media externalized on save and hydrated on load
 - Web and Linux desktop build verification
 - Windows desktop foundation through Dioxus desktop feature and Windows GUI subsystem setting
 
@@ -31,7 +31,7 @@ Not implemented yet:
 - Full editable canvas UX: polished drag/handle affordances
 - Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
-- Full external media storage with reference rewriting and garbage collection
+- Media storage polish: typed media-reference fields, stale media garbage collection, and richer media capability handling
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 

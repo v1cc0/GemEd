@@ -1876,6 +1876,7 @@ dependencies = [
 name = "gemed_storage"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "directories",
  "gemed_core",
  "serde",
