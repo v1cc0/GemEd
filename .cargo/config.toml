@@ -1,0 +1,5 @@
+# Project-local override for wasm/Dioxus builds.
+# Do not put host-only linker flags in global [build].rustflags; wasm rust-lld
+# rejects ELF linker arguments like `-fuse-ld=mold`.
+[target.wasm32-unknown-unknown]
+rustflags = []

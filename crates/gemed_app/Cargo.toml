@@ -1,0 +1,20 @@
+[package]
+name = "gemed_app"
+description = "Dioxus UI shell for GemEd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["launch", "macro", "html", "signals", "hooks", "logger"] }
+gemed_core = { path = "../gemed_core" }
+serde_json.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["HtmlTextAreaElement"] }
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web", "dep:wasm-bindgen", "dep:web-sys"]
+desktop = ["dioxus/desktop"]
+bundle = []

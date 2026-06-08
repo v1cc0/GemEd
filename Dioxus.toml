@@ -1,0 +1,23 @@
+[application]
+out_dir = "dist"
+asset_dir = "public"
+
+[web.app]
+title = "GemEd"
+
+[web.watcher]
+index_on_404 = true
+watch_path = ["crates", "src", "public", "examples"]
+
+[web.wasm_opt]
+level = "4"
+
+[bundle]
+identifier = "io.github.v1cc0.gemed"
+publisher = "GemEd"
+icon = ["public/icon.png"]
+resources = ["public/*", "examples/*"]
+copyright = ""
+category = "GraphicsAndDesign"
+short_description = "GemEd visual AI workflow editor"
+long_description = "GemEd is a Rust Dioxus rewrite of the visual AI workflow editor, targeting web, Linux desktop, and Windows desktop."
