@@ -1,6 +1,6 @@
 use dioxus::html::{
-    InteractionLocation, ModifiersInteraction, MouseEvent, PointerInteraction, WheelEvent,
-    geometry::WheelDelta, input_data::MouseButton,
+    InteractionElementOffset, InteractionLocation, ModifiersInteraction, MouseEvent,
+    PointerInteraction, WheelEvent, geometry::WheelDelta, input_data::MouseButton,
 };
 use dioxus::prelude::*;
 use gemed_core::{
@@ -16,6 +16,12 @@ use gemed_executor::{
 };
 use gemed_providers::ProviderRegistry;
 use gemed_storage::{DEFAULT_AUTOSAVE_SLOT, WorkflowSnapshot, WorkflowStorage};
+
+const CANVAS_WIDTH: f64 = 1400.0;
+const CANVAS_HEIGHT: f64 = 900.0;
+const NODE_CARD_WIDTH: f64 = 248.0;
+const NODE_CARD_HEIGHT: f64 = 128.0;
+const GROUP_SELECTION_MIN_SIZE: f64 = 18.0;
 
 const APP_CSS: &str = r#"
 :root {
@@ -54,6 +60,8 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .canvas-wrap.panning { cursor: grabbing; }
 .canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; cursor: grab; user-select: none; }
 .canvas.panning { cursor: grabbing; }
+.canvas.selecting { cursor: crosshair; }
+.selection-box { position: absolute; z-index: 4; pointer-events: none; border: 1.5px dashed rgba(186, 230, 253, .94); background: rgba(14, 165, 233, .16); border-radius: .45rem; box-shadow: 0 0 0 1px rgba(14, 165, 233, .12), inset 0 0 28px rgba(56, 189, 248, .12); }
 .group-box { position: absolute; border-radius: 1rem; pointer-events: none; z-index: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 .group-box.resizing { box-shadow: inset 0 0 0 1px rgba(255,255,255,.2), 0 0 0 3px rgba(125, 211, 252, .2); }
 .group-box.locked { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2px rgba(250, 204, 21, .14); }
@@ -143,6 +151,7 @@ pub fn App() -> Element {
     let drag_state = use_signal(|| None::<DragState>);
     let pan_state = use_signal(|| None::<PanState>);
     let group_resize_state = use_signal(|| None::<GroupResizeState>);
+    let group_selection_state = use_signal(|| None::<GroupSelectionState>);
     let viewport = use_signal(CanvasViewport::default);
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
 
@@ -152,7 +161,7 @@ pub fn App() -> Element {
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, viewport, connection_draft }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_selection_state, viewport, connection_draft }
             }
         }
     }
@@ -658,7 +667,7 @@ fn Sidebar(
                 h2 { "Canvas MVP" }
                 p { "{selected_summary}" }
                 p { class: "handle-hint",
-                    "Ctrl/Cmd-click nodes to add or remove them from the selection; drag a selected node or use arrows to move the whole selection."
+                    "Ctrl/Cmd-click nodes to add or remove them from the selection; drag a selected node or use arrows to move the whole selection. Shift-drag blank canvas to draw a group box."
                 }
                 div { class: "edit-grid",
                     button {
@@ -907,22 +916,30 @@ fn WorkflowCanvas(
     drag_state: Signal<Option<DragState>>,
     pan_state: Signal<Option<PanState>>,
     group_resize_state: Signal<Option<GroupResizeState>>,
+    group_selection_state: Signal<Option<GroupSelectionState>>,
     viewport: Signal<CanvasViewport>,
     connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
     let wf = workflow.read();
     let viewport_snapshot = *viewport.read();
     let is_panning = pan_state.read().is_some();
+    let active_selection_rect = group_selection_state
+        .read()
+        .as_ref()
+        .map(GroupSelectionState::rect);
     let wrap_class = if is_panning {
         "canvas-wrap panning"
     } else {
         "canvas-wrap"
     };
-    let canvas_class = if is_panning {
-        "canvas panning"
-    } else {
-        "canvas"
-    };
+    let mut canvas_classes = vec!["canvas"];
+    if is_panning {
+        canvas_classes.push("panning");
+    }
+    if active_selection_rect.is_some() {
+        canvas_classes.push("selecting");
+    }
+    let canvas_class = canvas_classes.join(" ");
     let canvas_style = format!(
         "transform: translate({:.1}px, {:.1}px) scale({:.3}); transform-origin: 0 0;",
         viewport_snapshot.pan_x, viewport_snapshot.pan_y, viewport_snapshot.zoom
@@ -942,22 +959,26 @@ fn WorkflowCanvas(
                     drag_state,
                     connection_draft,
                     group_resize_state,
+                    group_selection_state,
                 );
             },
             onmousemove: move |event: MouseEvent| {
                 update_dragged_node(event.clone(), workflow, json_text, drag_state);
                 update_group_resize(event.clone(), workflow, json_text, group_resize_state);
+                update_group_selection(event.clone(), group_selection_state);
                 update_canvas_pan(event, viewport, pan_state);
             },
             onmouseup: move |_| {
                 finish_drag(workflow, json_text, message, drag_state);
                 finish_group_resize(workflow, message, undo_stack, group_resize_state);
+                finish_group_selection(workflow, json_text, message, undo_stack, group_selection_state);
                 finish_canvas_pan(pan_state);
                 cancel_canvas_connection(message, connection_draft);
             },
             onmouseleave: move |_| {
                 finish_drag(workflow, json_text, message, drag_state);
                 finish_group_resize(workflow, message, undo_stack, group_resize_state);
+                cancel_group_selection(message, group_selection_state);
                 finish_canvas_pan(pan_state);
             },
             if wf.nodes.is_empty() {
@@ -971,8 +992,25 @@ fn WorkflowCanvas(
                 div {
                     class: "{canvas_class}",
                     style: "{canvas_style}",
+                    onmousedown: move |event: MouseEvent| {
+                        begin_group_selection(
+                            event,
+                            group_selection_state,
+                            viewport,
+                            drag_state,
+                            pan_state,
+                            connection_draft,
+                            group_resize_state,
+                        );
+                    },
                     for group in wf.groups.values() {
                         GroupBox { group: group.clone(), workflow, json_text, message, undo_stack, group_resize_state, viewport }
+                    }
+                    if let Some(rect) = active_selection_rect {
+                        div {
+                            class: "selection-box",
+                            style: "{rect.style()}",
+                        }
                     }
                     svg { class: "edge-layer", view_box: "0 0 1400 900",
                         defs {
@@ -1868,6 +1906,115 @@ fn finish_group_resize(
     }
 }
 
+fn begin_group_selection(
+    event: MouseEvent,
+    mut group_selection_state: Signal<Option<GroupSelectionState>>,
+    viewport: Signal<CanvasViewport>,
+    drag_state: Signal<Option<DragState>>,
+    pan_state: Signal<Option<PanState>>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
+    group_resize_state: Signal<Option<GroupResizeState>>,
+) {
+    let modifiers = event.data().modifiers();
+    if drag_state.read().is_some()
+        || pan_state.read().is_some()
+        || connection_draft.read().is_some()
+        || group_resize_state.read().is_some()
+        || group_selection_state.read().is_some()
+        || !modifiers.shift()
+        || !matches!(event.data().trigger_button(), Some(MouseButton::Primary))
+    {
+        return;
+    }
+
+    event.prevent_default();
+    event.stop_propagation();
+    let point = canvas_point_from_event(&event);
+    let client = event.data().client_coordinates();
+    group_selection_state.set(Some(GroupSelectionState {
+        start: point,
+        current: point,
+        start_client_x: client.x,
+        start_client_y: client.y,
+        start_viewport: *viewport.read(),
+    }));
+}
+
+fn update_group_selection(
+    event: MouseEvent,
+    mut group_selection_state: Signal<Option<GroupSelectionState>>,
+) {
+    let Some(mut selection) = group_selection_state.read().clone() else {
+        return;
+    };
+
+    event.prevent_default();
+    let point = event.data().client_coordinates();
+    selection.current = Position {
+        x: (selection.start.x
+            + (point.x - selection.start_client_x) / selection.start_viewport.zoom)
+            .clamp(0.0, CANVAS_WIDTH),
+        y: (selection.start.y
+            + (point.y - selection.start_client_y) / selection.start_viewport.zoom)
+            .clamp(0.0, CANVAS_HEIGHT),
+    };
+    group_selection_state.set(Some(selection));
+}
+
+fn finish_group_selection(
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    mut message: Signal<Message>,
+    undo_stack: Signal<WorkflowUndoStack>,
+    mut group_selection_state: Signal<Option<GroupSelectionState>>,
+) {
+    let Some(selection) = group_selection_state.read().clone() else {
+        return;
+    };
+    group_selection_state.set(None);
+
+    let rect = selection.rect();
+    if rect.width < GROUP_SELECTION_MIN_SIZE || rect.height < GROUP_SELECTION_MIN_SIZE {
+        message.set(Message::ok("Group selection cancelled: drag a larger box."));
+        return;
+    }
+
+    let mut workflow = workflow;
+    let mut json_text = json_text;
+    let mut message = message;
+    let mut undo_stack = undo_stack;
+    mutate_workflow(
+        &mut workflow,
+        &mut json_text,
+        &mut message,
+        &mut undo_stack,
+        move |workflow| {
+            let selected_ids = node_ids_intersecting_rect(workflow, rect);
+            if selected_ids.is_empty() {
+                return Err("Group selection did not include any nodes.".to_string());
+            }
+            let count = selected_ids.len();
+            let group =
+                create_group_for_nodes(workflow, &selected_ids).map_err(|err| err.to_string())?;
+            Ok(format!(
+                "Created group `{}` from box selection for {count} node(s).",
+                group.name
+            ))
+        },
+    );
+}
+
+fn cancel_group_selection(
+    mut message: Signal<Message>,
+    mut group_selection_state: Signal<Option<GroupSelectionState>>,
+) {
+    if group_selection_state.read().is_none() {
+        return;
+    }
+    group_selection_state.set(None);
+    message.set(Message::ok("Cancelled group box selection."));
+}
+
 fn begin_canvas_pan(
     event: MouseEvent,
     mut pan_state: Signal<Option<PanState>>,
@@ -1875,11 +2022,14 @@ fn begin_canvas_pan(
     drag_state: Signal<Option<DragState>>,
     connection_draft: Signal<Option<ConnectionDraft>>,
     group_resize_state: Signal<Option<GroupResizeState>>,
+    group_selection_state: Signal<Option<GroupSelectionState>>,
 ) {
     if drag_state.read().is_some()
         || pan_state.read().is_some()
         || connection_draft.read().is_some()
         || group_resize_state.read().is_some()
+        || group_selection_state.read().is_some()
+        || event.data().modifiers().shift()
         || !matches!(
             event.data().trigger_button(),
             Some(MouseButton::Primary | MouseButton::Auxiliary)
@@ -1936,6 +2086,23 @@ fn normalized_wheel_delta_y(delta: WheelDelta) -> f64 {
         WheelDelta::Lines(delta) => delta.y * 36.0,
         WheelDelta::Pages(delta) => delta.y * 720.0,
     }
+}
+
+fn canvas_point_from_event(event: &MouseEvent) -> Position {
+    let point = event.data().element_coordinates();
+    Position {
+        x: point.x.clamp(0.0, CANVAS_WIDTH),
+        y: point.y.clamp(0.0, CANVAS_HEIGHT),
+    }
+}
+
+fn node_ids_intersecting_rect(workflow: &WorkflowFile, rect: CanvasRect) -> Vec<String> {
+    workflow
+        .nodes
+        .iter()
+        .filter(|node| rect.intersects(CanvasRect::from_node(node)))
+        .map(|node| node.id.clone())
+        .collect()
 }
 
 fn is_additive_selection(event: &MouseEvent) -> bool {
@@ -2208,6 +2375,75 @@ struct GroupResizeState {
     before: WorkflowFile,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CanvasRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl CanvasRect {
+    fn from_points(start: Position, current: Position) -> Self {
+        let left = start.x.min(current.x).clamp(0.0, CANVAS_WIDTH);
+        let top = start.y.min(current.y).clamp(0.0, CANVAS_HEIGHT);
+        let right = start.x.max(current.x).clamp(0.0, CANVAS_WIDTH);
+        let bottom = start.y.max(current.y).clamp(0.0, CANVAS_HEIGHT);
+        Self {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        }
+    }
+
+    fn from_node(node: &WorkflowNode) -> Self {
+        Self {
+            x: node.position.x,
+            y: node.position.y,
+            width: NODE_CARD_WIDTH,
+            height: NODE_CARD_HEIGHT,
+        }
+    }
+
+    fn right(self) -> f64 {
+        self.x + self.width
+    }
+
+    fn bottom(self) -> f64 {
+        self.y + self.height
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        self.x <= other.right()
+            && self.right() >= other.x
+            && self.y <= other.bottom()
+            && self.bottom() >= other.y
+    }
+
+    fn style(self) -> String {
+        format!(
+            "left: {:.1}px; top: {:.1}px; width: {:.1}px; height: {:.1}px;",
+            self.x, self.y, self.width, self.height
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GroupSelectionState {
+    start: Position,
+    current: Position,
+    start_client_x: f64,
+    start_client_y: f64,
+    start_viewport: CanvasViewport,
+}
+
+impl GroupSelectionState {
+    fn rect(&self) -> CanvasRect {
+        CanvasRect::from_points(self.start, self.current)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct PanState {
     start_client_x: f64,
@@ -2223,7 +2459,10 @@ struct ConnectionDraft {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_json_extension, workflow_json_filename};
+    use super::{
+        CanvasRect, ensure_json_extension, node_ids_intersecting_rect, workflow_json_filename,
+    };
+    use gemed_core::{Position, WorkflowFile};
     use std::path::PathBuf;
 
     #[test]
@@ -2248,6 +2487,40 @@ mod tests {
         assert_eq!(
             ensure_json_extension(PathBuf::from("workflow.gemed")),
             PathBuf::from("workflow.gemed")
+        );
+    }
+
+    #[test]
+    fn canvas_rect_normalizes_drag_direction() {
+        let rect = CanvasRect::from_points(
+            Position { x: 340.0, y: 260.0 },
+            Position { x: 80.0, y: 110.0 },
+        );
+
+        assert_eq!(
+            rect,
+            CanvasRect {
+                x: 80.0,
+                y: 110.0,
+                width: 260.0,
+                height: 150.0,
+            }
+        );
+    }
+
+    #[test]
+    fn node_ids_intersecting_rect_uses_canvas_card_bounds() {
+        let workflow = WorkflowFile::example();
+        let rect = CanvasRect {
+            x: 60.0,
+            y: 80.0,
+            width: 300.0,
+            height: 220.0,
+        };
+
+        assert_eq!(
+            node_ids_intersecting_rect(&workflow, rect),
+            vec!["node_prompt"]
         );
     }
 }
