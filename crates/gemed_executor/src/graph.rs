@@ -1,4 +1,4 @@
-use gemed_core::{NodeType, WorkflowEdge, WorkflowFile, WorkflowNode};
+use gemed_core::{NodeType, WorkflowEdge, WorkflowFile, WorkflowNode, is_node_in_locked_group};
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -127,10 +127,17 @@ pub fn connected_inputs(workflow: &WorkflowFile, node_id: &str) -> ConnectedInpu
         .map(|node| (node.id.as_str(), node))
         .collect();
     let incoming_by_target = incoming_edges_by_target(&workflow.edges);
+    let locked_node_ids: HashSet<String> = workflow
+        .nodes
+        .iter()
+        .filter(|node| is_node_in_locked_group(workflow, &node.id))
+        .map(|node| node.id.clone())
+        .collect();
     connected_inputs_inner(
         node_id,
         &node_map,
         &incoming_by_target,
+        &locked_node_ids,
         &mut HashSet::new(),
         &mut HashMap::new(),
     )
@@ -140,6 +147,7 @@ fn connected_inputs_inner<'a>(
     node_id: &str,
     node_map: &HashMap<&'a str, &'a WorkflowNode>,
     incoming_by_target: &HashMap<&'a str, Vec<&'a WorkflowEdge>>,
+    locked_node_ids: &HashSet<String>,
     visited: &mut HashSet<String>,
     passthrough_cache: &mut HashMap<String, ConnectedInputs>,
 ) -> ConnectedInputs {
@@ -164,6 +172,9 @@ fn connected_inputs_inner<'a>(
         let Some(source) = node_map.get(edge.source.as_str()).copied() else {
             continue;
         };
+        if locked_node_ids.contains(source.id.as_str()) {
+            continue;
+        }
 
         if source.node_type == NodeType::Array
             && bool_field(&source.data, "batchMode") == Some(true)
@@ -184,6 +195,7 @@ fn connected_inputs_inner<'a>(
                     source.id.as_str(),
                     node_map,
                     incoming_by_target,
+                    locked_node_ids,
                     visited,
                     passthrough_cache,
                 );
@@ -195,6 +207,7 @@ fn connected_inputs_inner<'a>(
                         source.id.as_str(),
                         node_map,
                         incoming_by_target,
+                        locked_node_ids,
                         visited,
                         passthrough_cache,
                     );
@@ -235,6 +248,7 @@ fn connected_inputs_inner<'a>(
                 })
         && let Some(source) = node_map.get(ease_edge.source.as_str()).copied()
         && source.node_type == NodeType::EaseCurve
+        && !locked_node_ids.contains(source.id.as_str())
     {
         inputs.ease_curve = ease_curve_from_node(source);
     }
@@ -247,6 +261,7 @@ fn passthrough_inputs<'a>(
     node_id: &str,
     node_map: &HashMap<&'a str, &'a WorkflowNode>,
     incoming_by_target: &HashMap<&'a str, Vec<&'a WorkflowEdge>>,
+    locked_node_ids: &HashSet<String>,
     visited: &mut HashSet<String>,
     passthrough_cache: &mut HashMap<String, ConnectedInputs>,
 ) -> ConnectedInputs {
@@ -257,6 +272,7 @@ fn passthrough_inputs<'a>(
         node_id,
         node_map,
         incoming_by_target,
+        locked_node_ids,
         visited,
         passthrough_cache,
     );

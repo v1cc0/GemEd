@@ -79,7 +79,24 @@ impl WorkflowFile {
             ],
             ..Self::blank()
         };
-        workflow.groups = IndexMap::new();
+        workflow.nodes[0].group_id = Some("group_starter".to_string());
+        workflow.nodes[1].group_id = Some("group_starter".to_string());
+        workflow.groups = IndexMap::from([(
+            "group_starter".to_string(),
+            NodeGroup {
+                id: "group_starter".to_string(),
+                name: "Starter Group".to_string(),
+                color: GroupColor::Blue,
+                position: Position { x: 50.0, y: 70.0 },
+                size: Size {
+                    width: 660.0,
+                    height: 230.0,
+                },
+                locked: None,
+                is_nbp_input: None,
+                extra: IndexMap::new(),
+            },
+        )]);
         workflow
     }
 

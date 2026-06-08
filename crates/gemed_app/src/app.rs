@@ -1,9 +1,10 @@
 use dioxus::html::{InteractionLocation, MouseEvent};
 use dioxus::prelude::*;
 use gemed_core::{
-    NodeStatus, Position, WorkflowEdge, WorkflowFile, WorkflowNode, WorkflowUndoStack,
-    add_edge_between, move_node_by, remove_edge, select_node, selected_node_id, set_node_position,
-    source_handle_options, target_handle_options,
+    GroupColor, NodeGroup, NodeStatus, Position, WorkflowEdge, WorkflowFile, WorkflowNode,
+    WorkflowUndoStack, add_edge_between, is_node_in_locked_group, move_node_by, remove_edge,
+    select_node, selected_node_id, set_node_position, source_handle_options, target_handle_options,
+    toggle_group_lock,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -47,7 +48,13 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .message.err { color: #fecaca; background: rgba(127, 29, 29, .35); border: 1px solid rgba(248, 113, 113, .22); }
 .canvas-wrap { position: relative; overflow: auto; background-image: linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px); background-size: 32px 32px; }
 .canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; }
-.edge-layer { position: absolute; inset: 0; width: 1400px; height: 900px; pointer-events: none; overflow: visible; }
+.group-box { position: absolute; border-radius: 1rem; pointer-events: none; z-index: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.group-box.locked { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2px rgba(250, 204, 21, .14); }
+.group-box.nbp { border-style: dashed; }
+.group-header { position: absolute; left: .65rem; top: -.95rem; display: inline-flex; align-items: center; gap: .35rem; padding: .22rem .5rem; border-radius: .55rem; color: white; font-size: .72rem; font-weight: 750; pointer-events: auto; box-shadow: 0 10px 24px rgba(0, 0, 0, .28); }
+.group-lock-toggle { border: 1px solid rgba(255,255,255,.18); border-radius: .45rem; padding: .08rem .35rem; background: rgba(15, 23, 42, .36); color: white; cursor: pointer; font-size: .68rem; }
+.group-lock-toggle:hover { background: rgba(15, 23, 42, .62); }
+.edge-layer { position: absolute; inset: 0; width: 1400px; height: 900px; pointer-events: none; overflow: visible; z-index: 1; }
 .edge-group { pointer-events: none; }
 .edge-hit { stroke: transparent; stroke-width: 14; fill: none; pointer-events: stroke; cursor: pointer; }
 .edge { stroke: rgba(125, 211, 252, .64); stroke-width: 2.5; fill: none; marker-end: url(#arrow); pointer-events: none; }
@@ -57,9 +64,11 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .edge-action:hover { transform: scale(1.08); }
 .edge-delete-dot { fill: rgba(127, 29, 29, .9); stroke: rgba(248, 113, 113, .68); stroke-width: 1.5; filter: drop-shadow(0 7px 14px rgba(0, 0, 0, .35)); }
 .edge-delete-label { fill: #fecaca; font-size: 14px; font-weight: 800; pointer-events: none; user-select: none; }
-.node { position: absolute; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: visible; }
+.node { position: absolute; z-index: 2; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: visible; }
 .node.draggable { cursor: grab; user-select: none; }
 .node.dragging { cursor: grabbing; opacity: .92; }
+.node.locked { cursor: not-allowed; opacity: .86; }
+.node.locked::after { content: "LOCKED"; position: absolute; right: .65rem; bottom: .55rem; border-radius: 999px; padding: .12rem .42rem; color: #fde68a; background: rgba(113, 63, 18, .58); border: 1px solid rgba(250, 204, 21, .22); font-size: .62rem; font-weight: 800; letter-spacing: .04em; }
 .node.input { border-color: rgba(52, 211, 153, .38); }
 .node.generation { border-color: rgba(168, 85, 247, .48); }
 .node.processing { border-color: rgba(251, 191, 36, .38); }
@@ -104,6 +113,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .edge-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-radius: .7rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); padding: .45rem .55rem; }
 .edge-row code { color: #dbeafe; font-size: .72rem; overflow-wrap: anywhere; }
 .mini-action { border: 1px solid rgba(248, 113, 113, .28); color: #fecaca; background: rgba(127, 29, 29, .28); border-radius: .55rem; padding: .24rem .45rem; cursor: pointer; font-size: .72rem; }
+.mini-action.neutral { border-color: rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
 "#;
@@ -408,6 +418,39 @@ fn Sidebar(
                     }
                 }
             }
+            if !wf.groups.is_empty() {
+                section { class: "panel",
+                    h2 { "Groups" }
+                    div { class: "edge-list",
+                        for group in wf.groups.values() {
+                            {
+                                let group_id = group.id.clone();
+                                let label = if group.locked.unwrap_or(false) { "Unlock" } else { "Lock" };
+                                let state = if group.locked.unwrap_or(false) { "locked" } else { "unlocked" };
+                                rsx! {
+                                    div { class: "edge-row",
+                                        code { "{group.name} · {state}" }
+                                        button {
+                                            class: "mini-action neutral",
+                                            onclick: move |_| {
+                                                let group_id = group_id.clone();
+                                                toggle_group_lock_by_id(
+                                                    &group_id,
+                                                    &mut workflow,
+                                                    &mut json_text,
+                                                    &mut message,
+                                                    &mut undo_stack,
+                                                );
+                                            },
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             section { class: "panel",
                 h2 { "Canvas MVP" }
@@ -670,6 +713,9 @@ fn WorkflowCanvas(
                         finish_drag(workflow, json_text, message, drag_state);
                         cancel_canvas_connection(message, connection_draft);
                     },
+                    for group in wf.groups.values() {
+                        GroupBox { group: group.clone(), workflow, json_text, message, undo_stack }
+                    }
                     svg { class: "edge-layer", view_box: "0 0 1400 900",
                         defs {
                             marker { id: "arrow", marker_width: "10", marker_height: "10", ref_x: "9", ref_y: "3", orient: "auto", marker_units: "strokeWidth",
@@ -740,8 +786,82 @@ fn WorkflowCanvas(
                         }
                     }
                     for node in wf.nodes.iter() {
-                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state, viewport, connection_draft }
+                        NodeCard {
+                            node: node.clone(),
+                            locked: is_node_in_locked_group(&wf, &node.id),
+                            workflow,
+                            json_text,
+                            message,
+                            undo_stack,
+                            drag_state,
+                            viewport,
+                            connection_draft,
+                        }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn GroupBox(
+    group: NodeGroup,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    mut message: Signal<Message>,
+    mut undo_stack: Signal<WorkflowUndoStack>,
+) -> Element {
+    let color = group_color_style(group.color);
+    let background = group_background_style(group.color);
+    let border = group_border_style(&group);
+    let style = format!(
+        "left: {:.1}px; top: {:.1}px; width: {:.1}px; height: {:.1}px; background: {background}; border: {border};",
+        group.position.x.max(0.0),
+        group.position.y.max(0.0),
+        group.size.width.max(80.0),
+        group.size.height.max(48.0),
+    );
+    let mut class = vec!["group-box"];
+    if group.locked.unwrap_or(false) {
+        class.push("locked");
+    }
+    if group.is_nbp_input.unwrap_or(false) {
+        class.push("nbp");
+    }
+    let class = class.join(" ");
+    let header_style = format!("background: {color};");
+    let lock_label = if group.locked.unwrap_or(false) {
+        "Unlock"
+    } else {
+        "Lock"
+    };
+    let group_id = group.id.clone();
+
+    rsx! {
+        div { class: "{class}", style: "{style}",
+            div { class: "group-header", style: "{header_style}",
+                span { "{group.name}" }
+                if group.locked.unwrap_or(false) {
+                    span { "🔒" }
+                }
+                button {
+                    class: "group-lock-toggle",
+                    onmouseup: move |event: MouseEvent| {
+                        event.stop_propagation();
+                    },
+                    onclick: move |event: MouseEvent| {
+                        event.stop_propagation();
+                        let group_id = group_id.clone();
+                        toggle_group_lock_by_id(
+                            &group_id,
+                            &mut workflow,
+                            &mut json_text,
+                            &mut message,
+                            &mut undo_stack,
+                        );
+                    },
+                    "{lock_label}"
                 }
             }
         }
@@ -751,6 +871,7 @@ fn WorkflowCanvas(
 #[component]
 fn NodeCard(
     node: WorkflowNode,
+    locked: bool,
     mut workflow: Signal<WorkflowFile>,
     mut json_text: Signal<String>,
     mut message: Signal<Message>,
@@ -773,6 +894,9 @@ fn NodeCard(
     if node.dragging.unwrap_or(false) {
         classes.push("dragging");
     }
+    if locked {
+        classes.push("locked");
+    }
     let node_class = classes.join(" ");
     let label = node.display_label();
     let preview = node.preview_text();
@@ -787,6 +911,13 @@ fn NodeCard(
             style: "{style}",
             onmousedown: move |event: MouseEvent| {
                 event.stop_propagation();
+                if locked {
+                    message.set(Message::err(format!(
+                        "`{}` is in a locked group. Unlock the group before moving it.",
+                        node_id
+                    )));
+                    return;
+                }
                 let node_id = node_id.clone();
                 begin_node_drag(
                     event,
@@ -972,6 +1103,37 @@ fn edge_label(edge: &WorkflowEdge) -> String {
     )
 }
 
+fn group_color_style(color: GroupColor) -> &'static str {
+    match color {
+        GroupColor::Neutral => "rgba(82, 82, 91, .95)",
+        GroupColor::Blue => "rgba(37, 99, 235, .95)",
+        GroupColor::Green => "rgba(22, 163, 74, .95)",
+        GroupColor::Purple => "rgba(124, 58, 237, .95)",
+        GroupColor::Orange => "rgba(234, 88, 12, .95)",
+        GroupColor::Red => "rgba(220, 38, 38, .95)",
+    }
+}
+
+fn group_background_style(color: GroupColor) -> &'static str {
+    match color {
+        GroupColor::Neutral => "rgba(82, 82, 91, .20)",
+        GroupColor::Blue => "rgba(37, 99, 235, .18)",
+        GroupColor::Green => "rgba(22, 163, 74, .18)",
+        GroupColor::Purple => "rgba(124, 58, 237, .18)",
+        GroupColor::Orange => "rgba(234, 88, 12, .18)",
+        GroupColor::Red => "rgba(220, 38, 38, .18)",
+    }
+}
+
+fn group_border_style(group: &NodeGroup) -> String {
+    let style = if group.is_nbp_input.unwrap_or(false) {
+        "2px dashed"
+    } else {
+        "1px solid"
+    };
+    format!("{style} {}", group_color_style(group.color))
+}
+
 fn remove_edge_by_id(
     edge_id: &str,
     workflow: &mut Signal<WorkflowFile>,
@@ -989,6 +1151,23 @@ fn remove_edge_by_id(
                 )
             })
             .map_err(|err| err.to_string())
+    });
+}
+
+fn toggle_group_lock_by_id(
+    group_id: &str,
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+) {
+    let group_id = group_id.to_string();
+    mutate_workflow(workflow, json_text, message, undo_stack, move |workflow| {
+        let locked = toggle_group_lock(workflow, &group_id).map_err(|err| err.to_string())?;
+        Ok(format!(
+            "{} group `{group_id}`.",
+            if locked { "Locked" } else { "Unlocked" }
+        ))
     });
 }
 
@@ -1071,6 +1250,11 @@ fn mutate_selected_node(
         let Some(node_id) = selected_node_id(workflow).map(ToOwned::to_owned) else {
             return Err("Select a node before moving it.".to_string());
         };
+        if is_node_in_locked_group(workflow, &node_id) {
+            return Err(format!(
+                "`{node_id}` is in a locked group. Unlock the group before moving it."
+            ));
+        }
         let position = move_node_by(workflow, &node_id, dx, dy).map_err(|err| err.to_string())?;
         Ok(format!(
             "Moved `{node_id}` to ({:.0}, {:.0}).",

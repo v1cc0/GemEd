@@ -10,6 +10,8 @@ pub enum WorkflowEditError {
     EdgeNotFound(String),
     #[error("edge id `{0}` already exists")]
     DuplicateEdgeId(String),
+    #[error("group `{0}` was not found")]
+    GroupNotFound(String),
     #[error("cannot connect node `{0}` to itself")]
     SelfConnection(String),
     #[error("edge from `{source_id}` to `{target_id}` already exists")]
@@ -146,6 +148,26 @@ pub fn set_node_position(
         y: position.y.max(0.0),
     };
     Ok(())
+}
+
+pub fn is_node_in_locked_group(workflow: &WorkflowFile, node_id: &str) -> bool {
+    workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .and_then(|node| node.group_id.as_deref())
+        .and_then(|group_id| workflow.groups.get(group_id))
+        .is_some_and(|group| group.locked.unwrap_or(false))
+}
+
+pub fn toggle_group_lock(workflow: &mut WorkflowFile, group_id: &str) -> EditResult<bool> {
+    let group = workflow
+        .groups
+        .get_mut(group_id)
+        .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?;
+    let next = !group.locked.unwrap_or(false);
+    group.locked = next.then_some(true);
+    Ok(next)
 }
 
 pub fn add_edge_between(
@@ -308,7 +330,8 @@ fn outgoing_edges(workflow: &WorkflowFile) -> HashMap<&str, Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodeType, WorkflowNode};
+    use crate::{GroupColor, NodeGroup, NodeType, Size, WorkflowNode};
+    use indexmap::IndexMap;
     use serde_json::json;
 
     fn two_node_workflow() -> WorkflowFile {
@@ -461,5 +484,34 @@ mod tests {
 
         history.record(&workflow);
         assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn locked_group_members_are_detected_and_toggled() {
+        let mut workflow = two_node_workflow();
+        workflow.nodes[0].group_id = Some("group-1".to_string());
+        workflow.groups = IndexMap::from([(
+            "group-1".to_string(),
+            NodeGroup {
+                id: "group-1".to_string(),
+                name: "Locked".to_string(),
+                color: GroupColor::Blue,
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: 200.0,
+                    height: 160.0,
+                },
+                locked: None,
+                is_nbp_input: None,
+                extra: IndexMap::new(),
+            },
+        )]);
+
+        assert!(!is_node_in_locked_group(&workflow, "a"));
+        assert!(toggle_group_lock(&mut workflow, "group-1").unwrap());
+        assert!(is_node_in_locked_group(&workflow, "a"));
+        assert!(!is_node_in_locked_group(&workflow, "b"));
+        assert!(!toggle_group_lock(&mut workflow, "group-1").unwrap());
+        assert!(!is_node_in_locked_group(&workflow, "a"));
     }
 }

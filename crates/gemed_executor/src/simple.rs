@@ -2,7 +2,7 @@ use crate::array_parser::{ParseArrayOptions, SplitMode, parse_text_to_array};
 use crate::graph::{
     ConnectedInputs, DynamicInputValue, GraphError, connected_inputs, execution_order,
 };
-use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode};
+use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode, is_node_in_locked_group};
 use gemed_providers::{
     AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
     ProviderRegistry, VideoRequest,
@@ -140,12 +140,28 @@ async fn execute_workflow_inner(
     let mut report = SimpleExecutionReport::default();
 
     for node_id in order {
-        let inputs = connected_inputs(&workflow, &node_id);
         let index = workflow
             .nodes
             .iter()
             .position(|node| node.id == node_id)
             .ok_or_else(|| SimpleExecutionError::MissingNode(node_id.clone()))?;
+        if is_node_in_locked_group(&workflow, &node_id) {
+            let node_type = workflow.nodes[index].node_type.title().to_string();
+            set_status(&mut workflow.nodes[index], NodeStatusWire::Skipped);
+            set_data_field(
+                &mut workflow.nodes[index],
+                "error",
+                json!("Node skipped because its group is locked."),
+            );
+            report.events.push(NodeExecutionEvent {
+                node_id,
+                node_type,
+                status: NodeStatusWire::Skipped,
+                message: "Node skipped because its group is locked.".to_string(),
+            });
+            continue;
+        }
+        let inputs = connected_inputs(&workflow, &node_id);
         let node_snapshot = workflow.nodes[index].clone();
         let outcome = execute_node(&node_snapshot, &inputs, providers).await;
         apply_updates(&mut workflow.nodes[index], outcome.updates);
@@ -631,7 +647,8 @@ fn string_array_field(data: &Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gemed_core::{Position, WorkflowEdge};
+    use gemed_core::{GroupColor, NodeGroup, Position, Size, WorkflowEdge};
+    use indexmap::IndexMap;
 
     #[test]
     fn executes_prompt_array_output_flow() {
@@ -683,6 +700,68 @@ mod tests {
         let workflow = WorkflowFile::example();
         let result = execute_simple_workflow(&workflow).expect("executes");
         assert!(result.report.skipped_count() >= 1);
+    }
+
+    #[test]
+    fn locked_group_nodes_are_skipped_and_do_not_feed_downstream_inputs() {
+        let mut prompt = WorkflowNode::new(
+            "prompt",
+            NodeType::Prompt,
+            Position { x: 0.0, y: 0.0 },
+            json!({"prompt":"locked text"}),
+        );
+        prompt.group_id = Some("locked-group".to_string());
+        let workflow = WorkflowFile {
+            name: "locked".to_string(),
+            nodes: vec![
+                prompt,
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::new("e1", "prompt", "output")],
+            groups: IndexMap::from([(
+                "locked-group".to_string(),
+                NodeGroup {
+                    id: "locked-group".to_string(),
+                    name: "Locked".to_string(),
+                    color: GroupColor::Neutral,
+                    position: Position { x: 0.0, y: 0.0 },
+                    size: Size {
+                        width: 260.0,
+                        height: 180.0,
+                    },
+                    locked: Some(true),
+                    is_nbp_input: None,
+                    extra: IndexMap::new(),
+                },
+            )]),
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("executes");
+        let prompt = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "prompt")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+
+        assert_eq!(
+            prompt.data.get("status").and_then(Value::as_str),
+            Some("skipped")
+        );
+        assert_eq!(output.data.get("text").and_then(Value::as_str), None);
+        assert_eq!(result.report.skipped_count(), 1);
     }
 
     #[test]
