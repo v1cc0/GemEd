@@ -1804,6 +1804,7 @@ dependencies = [
  "dioxus",
  "gemed_core",
  "gemed_executor",
+ "gemed_providers",
  "serde_json",
  "wasm-bindgen",
  "web-sys",
@@ -1824,9 +1825,22 @@ dependencies = [
 name = "gemed_executor"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gemed_core",
+ "gemed_providers",
  "indexmap",
  "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gemed_providers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

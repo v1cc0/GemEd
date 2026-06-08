@@ -6,7 +6,7 @@ GemEd is being rewritten as a Rust + Dioxus visual workflow editor. The current 
 
 Implemented now:
 
-- Rust workspace with `gemed_core`, `gemed_executor`, and `gemed_app` crates
+- Rust workspace with `gemed_core`, `gemed_executor`, `gemed_providers`, and `gemed_app` crates
 - Dioxus app targeting web and desktop from one codebase
 - Workflow v1 schema for nodes, edges, groups, node statuses, and edge style
 - Graph traversal, connected-input resolution, and topological execution ordering
@@ -14,14 +14,15 @@ Implemented now:
 - Built-in sample workflow
 - JSON editor that loads and validates workflow JSON
 - Read-only SVG/HTML canvas rendering nodes and edges
-- Execution spine panel and Run Local action for pure-Rust workflow smoke runs
+- Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
+- Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
 - Web and Linux desktop build verification
 - Windows desktop foundation through Dioxus desktop feature and Windows GUI subsystem setting
 
 Not implemented yet:
 
 - Editable drag/connect canvas
-- Provider/API execution engine beyond explicit local skips
+- Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
 - Native file dialogs and persistent project storage
 

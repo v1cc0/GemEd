@@ -1,6 +1,10 @@
 use dioxus::prelude::*;
 use gemed_core::{NodeStatus, WorkflowFile, WorkflowNode};
-use gemed_executor::{SimpleExecutionReport, execute_simple_workflow, execution_order};
+use gemed_executor::{
+    SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
+    execution_order,
+};
+use gemed_providers::ProviderRegistry;
 
 const APP_CSS: &str = r#"
 :root {
@@ -179,6 +183,30 @@ fn Header(
                 }
                 button {
                     class: "action",
+                    onclick: move |_| {
+                        let current = workflow.read().clone();
+                        let providers = ProviderRegistry::mock_all();
+                        match execute_workflow_with_providers(&current, &providers) {
+                            Ok(result) => {
+                                let summary = result.report.summary();
+                                match result.workflow.to_pretty_json() {
+                                    Ok(json) => json_text.set(json),
+                                    Err(err) => message.set(Message::err(format!("Executed with mocks but failed to export JSON: {err}"))),
+                                }
+                                workflow.set(result.workflow);
+                                execution_report.set(Some(result.report));
+                                message.set(Message::ok(format!("Mock provider run finished: {summary}.")));
+                            }
+                            Err(err) => {
+                                execution_report.set(None);
+                                message.set(Message::err(format!("Mock provider run failed: {err}")));
+                            }
+                        }
+                    },
+                    "Run Mocks"
+                }
+                button {
+                    class: "action",
                     onclick: move |_| match workflow.read().to_pretty_json() {
                         Ok(json) => {
                             json_text.set(json);
@@ -254,7 +282,7 @@ fn Sidebar(
                         }
                     }
                 } else {
-                    p { "Run Local executes pure Rust prompt/array/output/control nodes and marks provider/media nodes as explicit skips." }
+                    p { "Run Local executes pure Rust prompt/array/output/control nodes and explicitly skips unregistered providers. Run Mocks wires mock provider traits for generation/LLM smoke tests without secrets." }
                 }
             }
             section { class: "panel",

@@ -1,0 +1,16 @@
+[package]
+name = "gemed_providers"
+description = "Provider capability traits and mock implementations for GemEd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true

@@ -3,6 +3,10 @@ use crate::graph::{
     ConnectedInputs, DynamicInputValue, GraphError, connected_inputs, execution_order,
 };
 use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode};
+use gemed_providers::{
+    AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
+    ProviderRegistry, VideoRequest,
+};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,6 +108,33 @@ pub enum SimpleExecutionError {
 pub fn execute_simple_workflow(
     workflow: &WorkflowFile,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_simple_workflow_async(workflow))
+}
+
+pub async fn execute_simple_workflow_async(
+    workflow: &WorkflowFile,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    execute_workflow_inner(workflow, &ProviderRegistry::new()).await
+}
+
+pub fn execute_workflow_with_providers(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_workflow_with_providers_async(workflow, providers))
+}
+
+pub async fn execute_workflow_with_providers_async(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    execute_workflow_inner(workflow, providers).await
+}
+
+async fn execute_workflow_inner(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let mut workflow = workflow.clone();
     let order = execution_order(&workflow)?;
     let mut report = SimpleExecutionReport::default();
@@ -116,7 +147,7 @@ pub fn execute_simple_workflow(
             .position(|node| node.id == node_id)
             .ok_or_else(|| SimpleExecutionError::MissingNode(node_id.clone()))?;
         let node_snapshot = workflow.nodes[index].clone();
-        let outcome = execute_node(&node_snapshot, &inputs);
+        let outcome = execute_node(&node_snapshot, &inputs, providers).await;
         apply_updates(&mut workflow.nodes[index], outcome.updates);
         set_status(&mut workflow.nodes[index], outcome.status);
         if let Some(error) = outcome.error.as_deref() {
@@ -174,7 +205,11 @@ impl NodeOutcome {
     }
 }
 
-fn execute_node(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
+async fn execute_node(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
     match node.node_type {
         NodeType::ImageInput | NodeType::AudioInput | NodeType::VideoInput => {
             NodeOutcome::complete("Input node is ready.", IndexMap::new())
@@ -189,13 +224,11 @@ fn execute_node(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
             "Control node evaluated as a pass-through/gate.",
             IndexMap::new(),
         ),
-        NodeType::NanoBanana
-        | NodeType::GenerateVideo
-        | NodeType::Generate3d
-        | NodeType::GenerateAudio
-        | NodeType::LlmGenerate => NodeOutcome::skipped(
-            "Provider execution is intentionally not wired in this local simple executor yet.",
-        ),
+        NodeType::NanoBanana => execute_image_generation(node, inputs, providers).await,
+        NodeType::GenerateVideo => execute_video_generation(node, inputs, providers).await,
+        NodeType::Generate3d => execute_3d_generation(node, inputs, providers).await,
+        NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers).await,
+        NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers).await,
         NodeType::SplitGrid
         | NodeType::ImageCompare
         | NodeType::VideoStitch
@@ -207,6 +240,186 @@ fn execute_node(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
         ),
         NodeType::Unknown => NodeOutcome::skipped("Unknown node type skipped."),
     }
+}
+
+async fn execute_llm_generation(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
+    let provider_id = llm_provider_id(node);
+    let Some(provider) = providers.get(&provider_id) else {
+        return provider_skipped(provider_id, "LLM");
+    };
+    let prompt = prompt_for_provider_node(node, inputs);
+    let model = model_for_node(node, "mock-llm");
+    let request = LlmRequest {
+        provider: provider_id,
+        model,
+        prompt,
+        input_images: input_images_for_node(node, inputs),
+        temperature: number_field(&node.data, "temperature"),
+        max_tokens: integer_field(&node.data, "maxTokens")
+            .and_then(|value| u32::try_from(value).ok()),
+        parameters: parameters_for_node(node),
+    };
+
+    match provider.generate_text(request).await {
+        Ok(response) => {
+            let mut updates = provider_common_updates(response.provider, response.model);
+            updates.insert(
+                "inputPrompt".to_string(),
+                json!(prompt_for_provider_node(node, inputs)),
+            );
+            updates.insert("outputText".to_string(), json!(response.text));
+            NodeOutcome::complete("LLM provider generated text.", updates)
+        }
+        Err(err) => provider_error("LLM provider failed", err),
+    }
+}
+
+async fn execute_image_generation(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
+    let provider_id = selected_provider_id(node, ProviderId::Gemini);
+    let Some(provider) = providers.get(&provider_id) else {
+        return provider_skipped(provider_id, "image");
+    };
+    let prompt = prompt_for_provider_node(node, inputs);
+    let model = model_for_node(node, "mock-image");
+    let input_images = input_images_for_node(node, inputs);
+    let request = ImageRequest {
+        provider: provider_id,
+        model,
+        prompt: prompt.clone(),
+        input_images: input_images.clone(),
+        parameters: parameters_for_node(node),
+    };
+
+    match provider.generate_image(request).await {
+        Ok(response) => {
+            let mut updates = provider_common_updates(response.provider, response.model);
+            updates.insert("inputPrompt".to_string(), json!(prompt));
+            updates.insert("inputImages".to_string(), json!(input_images));
+            updates.insert("outputImage".to_string(), json!(response.image));
+            NodeOutcome::complete("Image provider generated an image reference.", updates)
+        }
+        Err(err) => provider_error("Image provider failed", err),
+    }
+}
+
+async fn execute_video_generation(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
+    let provider_id = selected_provider_id(node, ProviderId::Replicate);
+    let Some(provider) = providers.get(&provider_id) else {
+        return provider_skipped(provider_id, "video");
+    };
+    let prompt = prompt_for_provider_node(node, inputs);
+    let model = model_for_node(node, "mock-video");
+    let input_images = input_images_for_node(node, inputs);
+    let request = VideoRequest {
+        provider: provider_id,
+        model,
+        prompt: prompt.clone(),
+        input_images: input_images.clone(),
+        parameters: parameters_for_node(node),
+    };
+
+    match provider.generate_video(request).await {
+        Ok(response) => {
+            let mut updates = provider_common_updates(response.provider, response.model);
+            updates.insert("inputPrompt".to_string(), json!(prompt));
+            updates.insert("inputImages".to_string(), json!(input_images));
+            updates.insert("outputVideo".to_string(), json!(response.video));
+            NodeOutcome::complete("Video provider generated a video reference.", updates)
+        }
+        Err(err) => provider_error("Video provider failed", err),
+    }
+}
+
+async fn execute_audio_generation(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
+    let provider_id = selected_provider_id(node, ProviderId::Replicate);
+    let Some(provider) = providers.get(&provider_id) else {
+        return provider_skipped(provider_id, "audio");
+    };
+    let prompt = prompt_for_provider_node(node, inputs);
+    let model = model_for_node(node, "mock-audio");
+    let request = AudioRequest {
+        provider: provider_id,
+        model,
+        prompt: prompt.clone(),
+        parameters: parameters_for_node(node),
+    };
+
+    match provider.generate_audio(request).await {
+        Ok(response) => {
+            let mut updates = provider_common_updates(response.provider, response.model);
+            updates.insert("inputPrompt".to_string(), json!(prompt));
+            updates.insert("outputAudio".to_string(), json!(response.audio));
+            NodeOutcome::complete("Audio provider generated an audio reference.", updates)
+        }
+        Err(err) => provider_error("Audio provider failed", err),
+    }
+}
+
+async fn execute_3d_generation(
+    node: &WorkflowNode,
+    inputs: &ConnectedInputs,
+    providers: &ProviderRegistry,
+) -> NodeOutcome {
+    let provider_id = selected_provider_id(node, ProviderId::Replicate);
+    let Some(provider) = providers.get(&provider_id) else {
+        return provider_skipped(provider_id, "3D");
+    };
+    let prompt = prompt_for_provider_node(node, inputs);
+    let model = model_for_node(node, "mock-3d");
+    let input_images = input_images_for_node(node, inputs);
+    let request = Model3dRequest {
+        provider: provider_id,
+        model,
+        prompt: prompt.clone(),
+        input_images: input_images.clone(),
+        parameters: parameters_for_node(node),
+    };
+
+    match provider.generate_model3d(request).await {
+        Ok(response) => {
+            let mut updates = provider_common_updates(response.provider, response.model);
+            updates.insert("inputPrompt".to_string(), json!(prompt));
+            updates.insert("inputImages".to_string(), json!(input_images));
+            updates.insert("output3dUrl".to_string(), json!(response.model_url));
+            NodeOutcome::complete("3D provider generated a model reference.", updates)
+        }
+        Err(err) => provider_error("3D provider failed", err),
+    }
+}
+
+fn provider_skipped(provider_id: ProviderId, capability: &str) -> NodeOutcome {
+    NodeOutcome::skipped(format!(
+        "{} provider `{}` is not registered. Local execution keeps secrets/platform calls out unless a provider backend is supplied.",
+        capability,
+        provider_id.display_name()
+    ))
+}
+
+fn provider_error(prefix: &str, err: ProviderError) -> NodeOutcome {
+    NodeOutcome::error(format!("{prefix}: {err}"), IndexMap::new())
+}
+
+fn provider_common_updates(provider: ProviderId, model: String) -> IndexMap<String, Value> {
+    let mut updates = IndexMap::new();
+    updates.insert("__providerUsed".to_string(), json!(provider.as_wire()));
+    updates.insert("__modelUsed".to_string(), json!(model));
+    updates
 }
 
 fn execute_prompt(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
@@ -302,6 +515,52 @@ fn execute_output_gallery(inputs: &ConnectedInputs) -> NodeOutcome {
     NodeOutcome::complete("Output gallery collected upstream images.", updates)
 }
 
+fn llm_provider_id(node: &WorkflowNode) -> ProviderId {
+    string_field(&node.data, "provider")
+        .map(|value| match value.as_str() {
+            "google" => ProviderId::Gemini,
+            other => ProviderId::from_wire(other),
+        })
+        .unwrap_or(ProviderId::Gemini)
+}
+
+fn selected_provider_id(node: &WorkflowNode, default: ProviderId) -> ProviderId {
+    nested_string_field(&node.data, "selectedModel", "provider")
+        .or_else(|| string_field(&node.data, "provider"))
+        .map(|value| ProviderId::from_wire(&value))
+        .unwrap_or(default)
+}
+
+fn model_for_node(node: &WorkflowNode, fallback: &str) -> String {
+    nested_string_field(&node.data, "selectedModel", "modelId")
+        .or_else(|| string_field(&node.data, "model"))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn prompt_for_provider_node(node: &WorkflowNode, inputs: &ConnectedInputs) -> String {
+    inputs
+        .text
+        .clone()
+        .or_else(|| string_field(&node.data, "inputPrompt"))
+        .or_else(|| string_field(&node.data, "prompt"))
+        .or_else(|| string_field(&node.data, "text"))
+        .unwrap_or_default()
+}
+
+fn input_images_for_node(node: &WorkflowNode, inputs: &ConnectedInputs) -> Vec<String> {
+    if !inputs.images.is_empty() {
+        return inputs.images.clone();
+    }
+    string_array_field(&node.data, "inputImages")
+}
+
+fn parameters_for_node(node: &WorkflowNode) -> Value {
+    node.data
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
 fn array_options_from_node(node: &WorkflowNode) -> ParseArrayOptions {
     ParseArrayOptions {
         split_mode: SplitMode::from_wire(string_field(&node.data, "splitMode").as_deref()),
@@ -340,6 +599,33 @@ fn string_field(data: &Value, key: &str) -> Option<String> {
 
 fn bool_field(data: &Value, key: &str) -> Option<bool> {
     data.get(key).and_then(Value::as_bool)
+}
+
+fn number_field(data: &Value, key: &str) -> Option<f64> {
+    data.get(key).and_then(Value::as_f64)
+}
+
+fn integer_field(data: &Value, key: &str) -> Option<u64> {
+    data.get(key).and_then(Value::as_u64)
+}
+
+fn nested_string_field(data: &Value, object_key: &str, field_key: &str) -> Option<String> {
+    data.get(object_key)
+        .and_then(|object| object.get(field_key))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_array_field(data: &Value, key: &str) -> Vec<String> {
+    data.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -397,5 +683,108 @@ mod tests {
         let workflow = WorkflowFile::example();
         let result = execute_simple_workflow(&workflow).expect("executes");
         assert!(result.report.skipped_count() >= 1);
+    }
+
+    #[test]
+    fn mock_llm_provider_executes_text_generation() {
+        let workflow = WorkflowFile {
+            name: "mock llm".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"prompt":"describe gemed"}),
+                ),
+                WorkflowNode::new(
+                    "llm",
+                    NodeType::LlmGenerate,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"provider":"mock","model":"mock-llm"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::new("e1", "prompt", "llm"),
+                WorkflowEdge::new("e2", "llm", "output"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let providers = ProviderRegistry::mock_all();
+        let result =
+            execute_workflow_with_providers(&workflow, &providers).expect("mock provider executes");
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        assert_eq!(
+            output.data.get("text").and_then(Value::as_str),
+            Some("[mock:mock:mock-llm] describe gemed")
+        );
+        assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn mock_image_provider_executes_generation_node() {
+        let workflow = WorkflowFile {
+            name: "mock image".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"prompt":"blue gem"}),
+                ),
+                WorkflowNode::new(
+                    "image",
+                    NodeType::NanoBanana,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({
+                        "selectedModel": {
+                            "provider": "mock",
+                            "modelId": "mock-image",
+                            "displayName": "Mock Image"
+                        }
+                    }),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::new("e1", "prompt", "image"),
+                WorkflowEdge::new("e2", "image", "output"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let providers = ProviderRegistry::mock_all();
+        let result =
+            execute_workflow_with_providers(&workflow, &providers).expect("mock provider executes");
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        assert!(
+            output
+                .data
+                .get("image")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("mock://image/mock/mock-image"))
+        );
+        assert_eq!(result.report.skipped_count(), 0);
     }
 }

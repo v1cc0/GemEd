@@ -7,7 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures.workspace = true
 gemed_core = { path = "../gemed_core" }
+gemed_providers = { path = "../gemed_providers" }
 indexmap.workspace = true
 regex.workspace = true
 serde.workspace = true
