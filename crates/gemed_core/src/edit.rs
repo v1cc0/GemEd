@@ -21,6 +21,8 @@ pub enum WorkflowEditError {
     DuplicateEdgeId(String),
     #[error("group `{0}` was not found")]
     GroupNotFound(String),
+    #[error("group `{0}` is locked")]
+    GroupLocked(String),
     #[error("no nodes selected for {0}")]
     EmptySelection(String),
     #[error("node `{0}` is in a locked group")]
@@ -264,12 +266,31 @@ pub fn resize_group_by(
     width_delta: f64,
     height_delta: f64,
 ) -> EditResult<Size> {
+    let current_size = workflow
+        .groups
+        .get(group_id)
+        .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?
+        .size;
+    set_group_size(
+        workflow,
+        group_id,
+        Size {
+            width: current_size.width + width_delta,
+            height: current_size.height + height_delta,
+        },
+    )
+}
+
+pub fn set_group_size(workflow: &mut WorkflowFile, group_id: &str, size: Size) -> EditResult<Size> {
     let group = workflow
         .groups
         .get_mut(group_id)
         .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?;
-    group.size.width = (group.size.width + width_delta).max(MIN_GROUP_WIDTH);
-    group.size.height = (group.size.height + height_delta).max(MIN_GROUP_HEIGHT);
+    if group.locked.unwrap_or(false) {
+        return Err(WorkflowEditError::GroupLocked(group_id.to_string()));
+    }
+    group.size.width = size.width.max(MIN_GROUP_WIDTH);
+    group.size.height = size.height.max(MIN_GROUP_HEIGHT);
     Ok(group.size)
 }
 
@@ -771,5 +792,40 @@ mod tests {
                 height: MIN_GROUP_HEIGHT
             }
         );
+    }
+
+    #[test]
+    fn setting_group_size_clamps_and_rejects_locked_group() {
+        let mut workflow = two_node_workflow();
+        create_group_for_nodes(&mut workflow, &["a".to_string()]).unwrap();
+
+        let size = set_group_size(
+            &mut workflow,
+            "group_1",
+            Size {
+                width: 240.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            size,
+            Size {
+                width: 240.0,
+                height: 200.0,
+            }
+        );
+
+        toggle_group_lock(&mut workflow, "group_1").unwrap();
+        let err = set_group_size(
+            &mut workflow,
+            "group_1",
+            Size {
+                width: 320.0,
+                height: 240.0,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, WorkflowEditError::GroupLocked(group_id) if group_id == "group_1"));
     }
 }
