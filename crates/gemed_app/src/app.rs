@@ -80,6 +80,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .handle-grid label { display: flex; flex-direction: column; gap: .25rem; color: #9fb0cf; font-size: .72rem; }
 .handle-grid select { width: 100%; border: 1px solid rgba(148, 163, 184, .22); border-radius: .65rem; padding: .42rem .5rem; color: #e5ecff; background: rgba(2, 6, 23, .72); }
 .handle-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .5rem; }
+.viewport-status { color: #9fb0cf; font-size: .78rem; margin-top: .55rem; }
 .edge-list { display: flex; flex-direction: column; gap: .4rem; max-height: 9rem; overflow: auto; }
 .edge-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-radius: .7rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); padding: .45rem .55rem; }
 .edge-row code { color: #dbeafe; font-size: .72rem; overflow-wrap: anywhere; }
@@ -101,14 +102,15 @@ pub fn App() -> Element {
     let execution_report = use_signal(|| None::<SimpleExecutionReport>);
     let undo_stack = use_signal(WorkflowUndoStack::default);
     let drag_state = use_signal(|| None::<DragState>);
+    let viewport = use_signal(CanvasViewport::default);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state }
             main { class: "main",
-                Sidebar { workflow, json_text, message, execution_report, undo_stack }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state }
+                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, viewport }
             }
         }
     }
@@ -304,6 +306,7 @@ fn Sidebar(
     mut message: Signal<Message>,
     execution_report: Signal<Option<SimpleExecutionReport>>,
     mut undo_stack: Signal<WorkflowUndoStack>,
+    mut viewport: Signal<CanvasViewport>,
 ) -> Element {
     let mut source_handle_choice = use_signal(String::new);
     let mut target_handle_choice = use_signal(String::new);
@@ -311,6 +314,8 @@ fn Sidebar(
     let counts = wf.node_type_counts();
     let can_undo = undo_stack.read().can_undo();
     let can_redo = undo_stack.read().can_redo();
+    let viewport_snapshot = *viewport.read();
+    let zoom_percent = (viewport_snapshot.zoom * 100.0).round() as i32;
     let selected_id = selected_node_id(&wf).map(ToOwned::to_owned);
     let selected_index = selected_id
         .as_ref()
@@ -493,6 +498,50 @@ fn Sidebar(
                         "Redo"
                     }
                 }
+                div { class: "edit-grid",
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            viewport.with_mut(|viewport| viewport.zoom_by(1.15));
+                        },
+                        "Zoom +"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            viewport.with_mut(|viewport| viewport.zoom_by(1.0 / 1.15));
+                        },
+                        "Zoom -"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| viewport.set(CanvasViewport::default()),
+                        "Reset View"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| viewport.with_mut(|viewport| viewport.pan_by(-64.0, 0.0)),
+                        "Pan ←"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| viewport.with_mut(|viewport| viewport.pan_by(0.0, -64.0)),
+                        "Pan ↑"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| viewport.with_mut(|viewport| viewport.pan_by(64.0, 0.0)),
+                        "Pan →"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| viewport.with_mut(|viewport| viewport.pan_by(0.0, 64.0)),
+                        "Pan ↓"
+                    }
+                }
+                p { class: "viewport-status",
+                    "View: {zoom_percent}% · pan ({viewport_snapshot.pan_x:.0}, {viewport_snapshot.pan_y:.0})"
+                }
                 if wf.edges.is_empty() {
                     p { "No edges yet." }
                 } else {
@@ -649,8 +698,14 @@ fn WorkflowCanvas(
     message: Signal<Message>,
     undo_stack: Signal<WorkflowUndoStack>,
     drag_state: Signal<Option<DragState>>,
+    viewport: Signal<CanvasViewport>,
 ) -> Element {
     let wf = workflow.read();
+    let viewport_snapshot = *viewport.read();
+    let canvas_style = format!(
+        "transform: translate({:.1}px, {:.1}px) scale({:.3}); transform-origin: 0 0;",
+        viewport_snapshot.pan_x, viewport_snapshot.pan_y, viewport_snapshot.zoom
+    );
 
     rsx! {
         section { class: "canvas-wrap",
@@ -664,6 +719,7 @@ fn WorkflowCanvas(
             } else {
                 div {
                     class: "canvas",
+                    style: "{canvas_style}",
                     onmousemove: move |event: MouseEvent| {
                         update_dragged_node(event, workflow, json_text, drag_state);
                     },
@@ -683,7 +739,7 @@ fn WorkflowCanvas(
                         }
                     }
                     for node in wf.nodes.iter() {
-                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state }
+                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state, viewport }
                     }
                 }
             }
@@ -699,6 +755,7 @@ fn NodeCard(
     mut message: Signal<Message>,
     mut undo_stack: Signal<WorkflowUndoStack>,
     drag_state: Signal<Option<DragState>>,
+    viewport: Signal<CanvasViewport>,
 ) -> Element {
     let style = format!(
         "left: {}px; top: {}px;",
@@ -731,9 +788,9 @@ fn NodeCard(
                     &node_id,
                     &mut workflow,
                     &mut json_text,
-                    &mut message,
                     &mut undo_stack,
                     drag_state,
+                    viewport,
                 );
             },
             div { class: "node-head",
@@ -1038,41 +1095,35 @@ fn begin_node_drag(
     node_id: &str,
     workflow: &mut Signal<WorkflowFile>,
     json_text: &mut Signal<String>,
-    message: &mut Signal<Message>,
     undo_stack: &mut Signal<WorkflowUndoStack>,
     mut drag_state: Signal<Option<DragState>>,
+    viewport: Signal<CanvasViewport>,
 ) {
     let before = workflow.read().clone();
     let Some(node) = before.nodes.iter().find(|node| node.id == node_id) else {
-        message.set(Message::err(format!("Node `{node_id}` disappeared.")));
         return;
     };
     let point = event.data().client_coordinates();
+    let viewport = *viewport.read();
     let mut next = before.clone();
-    if let Err(err) = select_node(&mut next, Some(node_id)) {
-        message.set(Message::err(format!("Drag start failed: {err}")));
+    if select_node(&mut next, Some(node_id)).is_err() {
         return;
     }
     set_node_dragging(&mut next, node_id, true);
 
-    match next.to_pretty_json() {
-        Ok(json) => {
-            if next != before {
-                undo_stack.write().record(&before);
-            }
-            workflow.set(next);
-            json_text.set(json);
-            drag_state.set(Some(DragState {
-                node_id: node_id.to_string(),
-                start_client_x: point.x,
-                start_client_y: point.y,
-                start_position: node.position,
-            }));
-            message.set(Message::ok(format!(
-                "Dragging `{node_id}`. Release mouse to commit."
-            )));
+    if let Ok(json) = next.to_pretty_json() {
+        if next != before {
+            undo_stack.write().record(&before);
         }
-        Err(err) => message.set(Message::err(format!("Drag start export failed: {err}"))),
+        workflow.set(next);
+        json_text.set(json);
+        drag_state.set(Some(DragState {
+            node_id: node_id.to_string(),
+            start_client_x: point.x,
+            start_client_y: point.y,
+            start_position: node.position,
+            start_viewport: viewport,
+        }));
     }
 }
 
@@ -1086,9 +1137,10 @@ fn update_dragged_node(
         return;
     };
     let point = event.data().client_coordinates();
+    let zoom = drag.start_viewport.zoom;
     let next_position = Position {
-        x: drag.start_position.x + point.x - drag.start_client_x,
-        y: drag.start_position.y + point.y - drag.start_client_y,
+        x: drag.start_position.x + (point.x - drag.start_client_x) / zoom,
+        y: drag.start_position.y + (point.y - drag.start_client_y) / zoom,
     };
     let mut next = workflow.read().clone();
     if set_node_position(&mut next, &drag.node_id, next_position).is_err() {
@@ -1242,10 +1294,42 @@ fn _status_used_for_exhaustiveness(status: NodeStatus) -> &'static str {
     status.label()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CanvasViewport {
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+}
+
+impl CanvasViewport {
+    const MIN_ZOOM: f64 = 0.35;
+    const MAX_ZOOM: f64 = 2.5;
+
+    fn zoom_by(&mut self, factor: f64) {
+        self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+    }
+
+    fn pan_by(&mut self, dx: f64, dy: f64) {
+        self.pan_x += dx;
+        self.pan_y += dy;
+    }
+}
+
+impl Default for CanvasViewport {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct DragState {
     node_id: String,
     start_client_x: f64,
     start_client_y: f64,
     start_position: Position,
+    start_viewport: CanvasViewport,
 }
