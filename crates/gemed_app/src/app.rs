@@ -1,7 +1,8 @@
+use dioxus::html::{InteractionLocation, MouseEvent};
 use dioxus::prelude::*;
 use gemed_core::{
-    NodeStatus, WorkflowFile, WorkflowNode, add_edge_between, move_node_by, remove_edge,
-    select_node, selected_node_id,
+    NodeStatus, Position, WorkflowFile, WorkflowNode, WorkflowUndoStack, add_edge_between,
+    move_node_by, remove_edge, select_node, selected_node_id, set_node_position,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -48,6 +49,8 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .edge-layer { position: absolute; inset: 0; width: 1400px; height: 900px; pointer-events: none; overflow: visible; }
 .edge { stroke: rgba(125, 211, 252, .64); stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
 .node { position: absolute; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: hidden; }
+.node.draggable { cursor: grab; user-select: none; }
+.node.dragging { cursor: grabbing; opacity: .92; }
 .node.input { border-color: rgba(52, 211, 153, .38); }
 .node.generation { border-color: rgba(168, 85, 247, .48); }
 .node.processing { border-color: rgba(251, 191, 36, .38); }
@@ -91,14 +94,16 @@ pub fn App() -> Element {
     let json_text = use_signal(|| initial_json);
     let message = use_signal(|| Message::ok("Loaded built-in starter workflow."));
     let execution_report = use_signal(|| None::<SimpleExecutionReport>);
+    let undo_stack = use_signal(WorkflowUndoStack::default);
+    let drag_state = use_signal(|| None::<DragState>);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
-            Header { workflow, json_text, message, execution_report }
+            Header { workflow, json_text, message, execution_report, undo_stack, drag_state }
             main { class: "main",
-                Sidebar { workflow, json_text, message, execution_report }
-                WorkflowCanvas { workflow, json_text, message }
+                Sidebar { workflow, json_text, message, execution_report, undo_stack }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state }
             }
         }
     }
@@ -110,6 +115,8 @@ fn Header(
     mut json_text: Signal<String>,
     mut message: Signal<Message>,
     mut execution_report: Signal<Option<SimpleExecutionReport>>,
+    mut undo_stack: Signal<WorkflowUndoStack>,
+    mut drag_state: Signal<Option<DragState>>,
 ) -> Element {
     rsx! {
         header { class: "header",
@@ -127,6 +134,8 @@ fn Header(
                                 workflow.set(next);
                                 json_text.set(json);
                                 execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
                                 message.set(Message::ok("Started a blank workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize blank workflow: {err}"))),
@@ -143,6 +152,8 @@ fn Header(
                                 workflow.set(next);
                                 json_text.set(json);
                                 execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
                                 message.set(Message::ok("Reset to built-in starter workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize sample workflow: {err}"))),
@@ -162,6 +173,8 @@ fn Header(
                             );
                             workflow.set(parsed);
                             execution_report.set(None);
+                            undo_stack.write().clear();
+                            drag_state.set(None);
                             message.set(Message::ok(summary));
                         }
                         Err(err) => message.set(Message::err(format!("Workflow JSON rejected: {err}"))),
@@ -182,6 +195,8 @@ fn Header(
                             }
                             workflow.set(result.workflow);
                             execution_report.set(Some(result.report));
+                            undo_stack.write().clear();
+                            drag_state.set(None);
                             message.set(Message::ok(format!("Local executor finished: {summary}.")));
                         }
                         Err(err) => {
@@ -206,6 +221,8 @@ fn Header(
                                 }
                                 workflow.set(result.workflow);
                                 execution_report.set(Some(result.report));
+                                undo_stack.write().clear();
+                                drag_state.set(None);
                                 message.set(Message::ok(format!("Mock provider run finished: {summary}.")));
                             }
                             Err(err) => {
@@ -254,6 +271,8 @@ fn Header(
                                     workflow.set(next);
                                     json_text.set(json);
                                     execution_report.set(None);
+                                    undo_stack.write().clear();
+                                    drag_state.set(None);
                                     message.set(Message::ok(format!(
                                         "Loaded {} slot `{DEFAULT_AUTOSAVE_SLOT}`.",
                                         storage_backend_label()
@@ -279,9 +298,12 @@ fn Sidebar(
     mut json_text: Signal<String>,
     mut message: Signal<Message>,
     execution_report: Signal<Option<SimpleExecutionReport>>,
+    mut undo_stack: Signal<WorkflowUndoStack>,
 ) -> Element {
     let wf = workflow.read();
     let counts = wf.node_type_counts();
+    let can_undo = undo_stack.read().can_undo();
+    let can_redo = undo_stack.read().can_redo();
     let selected_id = selected_node_id(&wf).map(ToOwned::to_owned);
     let selected_index = selected_id
         .as_ref()
@@ -343,7 +365,7 @@ fn Sidebar(
                     button {
                         class: "action",
                         onclick: move |_| {
-                            mutate_workflow(&mut workflow, &mut json_text, &mut message, |workflow| {
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, |workflow| {
                                 if workflow.nodes.is_empty() {
                                     return Err("No nodes to select.".to_string());
                                 }
@@ -362,7 +384,7 @@ fn Sidebar(
                         class: "action",
                         disabled: selected_id.is_none(),
                         onclick: move |_| {
-                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, -32.0, 0.0);
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, -32.0, 0.0);
                         },
                         "←"
                     }
@@ -370,7 +392,7 @@ fn Sidebar(
                         class: "action",
                         disabled: selected_id.is_none(),
                         onclick: move |_| {
-                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 32.0, 0.0);
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 32.0, 0.0);
                         },
                         "→"
                     }
@@ -378,7 +400,7 @@ fn Sidebar(
                         class: "action",
                         disabled: selected_id.is_none(),
                         onclick: move |_| {
-                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 0.0, -32.0);
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 0.0, -32.0);
                         },
                         "↑"
                     }
@@ -386,7 +408,7 @@ fn Sidebar(
                         class: "action",
                         disabled: selected_id.is_none(),
                         onclick: move |_| {
-                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 0.0, 32.0);
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 0.0, 32.0);
                         },
                         "↓"
                     }
@@ -394,7 +416,7 @@ fn Sidebar(
                         class: "action",
                         disabled: selected_id.is_none() || next_node_id.is_none(),
                         onclick: move |_| {
-                            mutate_workflow(&mut workflow, &mut json_text, &mut message, |workflow| {
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, |workflow| {
                                 let Some(source) = selected_node_id(workflow).map(ToOwned::to_owned) else {
                                     return Err("Select a source node first.".to_string());
                                 };
@@ -408,6 +430,34 @@ fn Sidebar(
                             });
                         },
                         "Connect Next"
+                    }
+                    button {
+                        class: "action",
+                        disabled: !can_undo,
+                        onclick: move |_| {
+                            apply_history_action(
+                                &mut workflow,
+                                &mut json_text,
+                                &mut message,
+                                &mut undo_stack,
+                                HistoryDirection::Undo,
+                            );
+                        },
+                        "Undo"
+                    }
+                    button {
+                        class: "action",
+                        disabled: !can_redo,
+                        onclick: move |_| {
+                            apply_history_action(
+                                &mut workflow,
+                                &mut json_text,
+                                &mut message,
+                                &mut undo_stack,
+                                HistoryDirection::Redo,
+                            );
+                        },
+                        "Redo"
                     }
                 }
                 if wf.edges.is_empty() {
@@ -424,7 +474,7 @@ fn Sidebar(
                                             class: "mini-action",
                                             onclick: move |_| {
                                                 let edge_id = edge_id.clone();
-                                                mutate_workflow(&mut workflow, &mut json_text, &mut message, move |workflow| {
+                                                mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
                                                     remove_edge(workflow, &edge_id)
                                                         .map(|edge| format!("Removed edge `{}` ({} → {}).", edge.id, edge.source, edge.target))
                                                         .map_err(|err| err.to_string())
@@ -479,6 +529,8 @@ fn WorkflowCanvas(
     workflow: Signal<WorkflowFile>,
     json_text: Signal<String>,
     message: Signal<Message>,
+    undo_stack: Signal<WorkflowUndoStack>,
+    drag_state: Signal<Option<DragState>>,
 ) -> Element {
     let wf = workflow.read();
 
@@ -492,7 +544,14 @@ fn WorkflowCanvas(
                     }
                 }
             } else {
-                div { class: "canvas",
+                div {
+                    class: "canvas",
+                    onmousemove: move |event: MouseEvent| {
+                        update_dragged_node(event, workflow, json_text, drag_state);
+                    },
+                    onmouseup: move |_| {
+                        finish_drag(workflow, json_text, message, drag_state);
+                    },
                     svg { class: "edge-layer", view_box: "0 0 1400 900",
                         defs {
                             marker { id: "arrow", marker_width: "10", marker_height: "10", ref_x: "9", ref_y: "3", orient: "auto", marker_units: "strokeWidth",
@@ -506,7 +565,7 @@ fn WorkflowCanvas(
                         }
                     }
                     for node in wf.nodes.iter() {
-                        NodeCard { node: node.clone(), workflow, json_text, message }
+                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state }
                     }
                 }
             }
@@ -520,6 +579,8 @@ fn NodeCard(
     mut workflow: Signal<WorkflowFile>,
     mut json_text: Signal<String>,
     mut message: Signal<Message>,
+    mut undo_stack: Signal<WorkflowUndoStack>,
+    drag_state: Signal<Option<DragState>>,
 ) -> Element {
     let style = format!(
         "left: {}px; top: {}px;",
@@ -528,11 +589,14 @@ fn NodeCard(
     );
     let status = node.status();
     let status_class = format!("badge {}", status.label());
-    let node_class = if node.selected.unwrap_or(false) {
-        format!("node {} selected", node.node_type.class_name())
-    } else {
-        format!("node {}", node.node_type.class_name())
-    };
+    let mut classes = vec!["node", node.node_type.class_name(), "draggable"];
+    if node.selected.unwrap_or(false) {
+        classes.push("selected");
+    }
+    if node.dragging.unwrap_or(false) {
+        classes.push("dragging");
+    }
+    let node_class = classes.join(" ");
     let label = node.display_label();
     let preview = node.preview_text();
     let node_id = node.id.clone();
@@ -541,13 +605,18 @@ fn NodeCard(
         article {
             class: "{node_class}",
             style: "{style}",
-            onclick: move |_| {
+            onmousedown: move |event: MouseEvent| {
+                event.stop_propagation();
                 let node_id = node_id.clone();
-                mutate_workflow(&mut workflow, &mut json_text, &mut message, move |workflow| {
-                    select_node(workflow, Some(&node_id))
-                        .map_err(|err| err.to_string())?;
-                    Ok(format!("Selected `{node_id}`."))
-                });
+                begin_node_drag(
+                    event,
+                    &node_id,
+                    &mut workflow,
+                    &mut json_text,
+                    &mut message,
+                    &mut undo_stack,
+                    drag_state,
+                );
             },
             div { class: "node-head",
                 div { class: "node-title", "{label}" }
@@ -583,10 +652,11 @@ fn mutate_selected_node(
     workflow: &mut Signal<WorkflowFile>,
     json_text: &mut Signal<String>,
     message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
     dx: f64,
     dy: f64,
 ) {
-    mutate_workflow(workflow, json_text, message, |workflow| {
+    mutate_workflow(workflow, json_text, message, undo_stack, |workflow| {
         let Some(node_id) = selected_node_id(workflow).map(ToOwned::to_owned) else {
             return Err("Select a node before moving it.".to_string());
         };
@@ -602,14 +672,19 @@ fn mutate_workflow<F>(
     workflow: &mut Signal<WorkflowFile>,
     json_text: &mut Signal<String>,
     message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
     mut mutation: F,
 ) where
     F: FnMut(&mut WorkflowFile) -> Result<String, String>,
 {
-    let mut next = workflow.read().clone();
+    let before = workflow.read().clone();
+    let mut next = before.clone();
     match mutation(&mut next) {
         Ok(success) => match next.to_pretty_json() {
             Ok(json) => {
+                if next != before {
+                    undo_stack.write().record(&before);
+                }
                 workflow.set(next);
                 json_text.set(json);
                 message.set(Message::ok(success));
@@ -619,6 +694,156 @@ fn mutate_workflow<F>(
             ))),
         },
         Err(err) => message.set(Message::err(err)),
+    }
+}
+
+fn begin_node_drag(
+    event: MouseEvent,
+    node_id: &str,
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+    mut drag_state: Signal<Option<DragState>>,
+) {
+    let before = workflow.read().clone();
+    let Some(node) = before.nodes.iter().find(|node| node.id == node_id) else {
+        message.set(Message::err(format!("Node `{node_id}` disappeared.")));
+        return;
+    };
+    let point = event.data().client_coordinates();
+    let mut next = before.clone();
+    if let Err(err) = select_node(&mut next, Some(node_id)) {
+        message.set(Message::err(format!("Drag start failed: {err}")));
+        return;
+    }
+    set_node_dragging(&mut next, node_id, true);
+
+    match next.to_pretty_json() {
+        Ok(json) => {
+            if next != before {
+                undo_stack.write().record(&before);
+            }
+            workflow.set(next);
+            json_text.set(json);
+            drag_state.set(Some(DragState {
+                node_id: node_id.to_string(),
+                start_client_x: point.x,
+                start_client_y: point.y,
+                start_position: node.position,
+            }));
+            message.set(Message::ok(format!(
+                "Dragging `{node_id}`. Release mouse to commit."
+            )));
+        }
+        Err(err) => message.set(Message::err(format!("Drag start export failed: {err}"))),
+    }
+}
+
+fn update_dragged_node(
+    event: MouseEvent,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    drag_state: Signal<Option<DragState>>,
+) {
+    let Some(drag) = drag_state.read().clone() else {
+        return;
+    };
+    let point = event.data().client_coordinates();
+    let next_position = Position {
+        x: drag.start_position.x + point.x - drag.start_client_x,
+        y: drag.start_position.y + point.y - drag.start_client_y,
+    };
+    let mut next = workflow.read().clone();
+    if set_node_position(&mut next, &drag.node_id, next_position).is_err() {
+        return;
+    }
+    set_node_dragging(&mut next, &drag.node_id, true);
+    if let Ok(json) = next.to_pretty_json() {
+        workflow.set(next);
+        json_text.set(json);
+    }
+}
+
+fn finish_drag(
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    mut message: Signal<Message>,
+    mut drag_state: Signal<Option<DragState>>,
+) {
+    let Some(drag) = drag_state.read().clone() else {
+        return;
+    };
+    drag_state.set(None);
+    let mut next = workflow.read().clone();
+    set_node_dragging(&mut next, &drag.node_id, false);
+    let Some(node) = next.nodes.iter().find(|node| node.id == drag.node_id) else {
+        message.set(Message::err(format!(
+            "Dragged node `{}` disappeared.",
+            drag.node_id
+        )));
+        return;
+    };
+    let summary = format!(
+        "Moved `{}` to ({:.0}, {:.0}).",
+        drag.node_id, node.position.x, node.position.y
+    );
+    match next.to_pretty_json() {
+        Ok(json) => {
+            workflow.set(next);
+            json_text.set(json);
+            message.set(Message::ok(summary));
+        }
+        Err(err) => message.set(Message::err(format!("Drag finish export failed: {err}"))),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HistoryDirection {
+    Undo,
+    Redo,
+}
+
+fn apply_history_action(
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+    direction: HistoryDirection,
+) {
+    let mut next = workflow.read().clone();
+    let result = match direction {
+        HistoryDirection::Undo => undo_stack.write().undo(&mut next),
+        HistoryDirection::Redo => undo_stack.write().redo(&mut next),
+    };
+    if let Err(err) = result {
+        message.set(Message::err(err.to_string()));
+        return;
+    }
+
+    clear_dragging_flags(&mut next);
+    match next.to_pretty_json() {
+        Ok(json) => {
+            workflow.set(next);
+            json_text.set(json);
+            message.set(Message::ok(match direction {
+                HistoryDirection::Undo => "Undid last canvas edit.",
+                HistoryDirection::Redo => "Redid canvas edit.",
+            }));
+        }
+        Err(err) => message.set(Message::err(format!("History export failed: {err}"))),
+    }
+}
+
+fn set_node_dragging(workflow: &mut WorkflowFile, node_id: &str, dragging: bool) {
+    if let Some(node) = workflow.nodes.iter_mut().find(|node| node.id == node_id) {
+        node.dragging = dragging.then_some(true);
+    }
+}
+
+fn clear_dragging_flags(workflow: &mut WorkflowFile) {
+    for node in &mut workflow.nodes {
+        node.dragging = None;
     }
 }
 
@@ -679,4 +904,12 @@ impl Message {
 #[allow(dead_code)]
 fn _status_used_for_exhaustiveness(status: NodeStatus) -> &'static str {
     status.label()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DragState {
+    node_id: String,
+    start_client_x: f64,
+    start_client_y: f64,
+    start_position: Position,
 }

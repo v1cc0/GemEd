@@ -22,9 +22,79 @@ pub enum WorkflowEditError {
         source_id: String,
         target_id: String,
     },
+    #[error("{0} history is empty")]
+    HistoryEmpty(String),
 }
 
 pub type EditResult<T> = std::result::Result<T, WorkflowEditError>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowUndoStack {
+    undo: Vec<WorkflowFile>,
+    redo: Vec<WorkflowFile>,
+    limit: usize,
+}
+
+impl WorkflowUndoStack {
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    pub fn record(&mut self, before: &WorkflowFile) {
+        if self.undo.last() == Some(before) {
+            return;
+        }
+
+        self.undo.push(before.clone());
+        if self.undo.len() > self.limit {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    pub fn undo(&mut self, current: &mut WorkflowFile) -> EditResult<()> {
+        let previous = self
+            .undo
+            .pop()
+            .ok_or_else(|| WorkflowEditError::HistoryEmpty("undo".to_string()))?;
+        self.redo.push(current.clone());
+        *current = previous;
+        Ok(())
+    }
+
+    pub fn redo(&mut self, current: &mut WorkflowFile) -> EditResult<()> {
+        let next = self
+            .redo
+            .pop()
+            .ok_or_else(|| WorkflowEditError::HistoryEmpty("redo".to_string()))?;
+        self.undo.push(current.clone());
+        *current = next;
+        Ok(())
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+}
+
+impl Default for WorkflowUndoStack {
+    fn default() -> Self {
+        Self::with_limit(100)
+    }
+}
 
 pub fn selected_node_id(workflow: &WorkflowFile) -> Option<&str> {
     workflow
@@ -279,5 +349,36 @@ mod tests {
         let removed = remove_edge(&mut workflow, "edge_a_b").unwrap();
         assert_eq!(removed.source, "a");
         assert!(workflow.edges.is_empty());
+    }
+
+    #[test]
+    fn undo_stack_restores_and_redoes_workflow_snapshots() {
+        let mut workflow = two_node_workflow();
+        let mut history = WorkflowUndoStack::default();
+
+        history.record(&workflow);
+        move_node_by(&mut workflow, "a", 10.0, 0.0).unwrap();
+        assert_eq!(workflow.nodes[0].position.x, 20.0);
+
+        history.undo(&mut workflow).unwrap();
+        assert_eq!(workflow.nodes[0].position.x, 10.0);
+        assert!(history.can_redo());
+
+        history.redo(&mut workflow).unwrap();
+        assert_eq!(workflow.nodes[0].position.x, 20.0);
+    }
+
+    #[test]
+    fn undo_stack_clears_redo_after_new_record() {
+        let mut workflow = two_node_workflow();
+        let mut history = WorkflowUndoStack::default();
+
+        history.record(&workflow);
+        move_node_by(&mut workflow, "a", 10.0, 0.0).unwrap();
+        history.undo(&mut workflow).unwrap();
+        assert!(history.can_redo());
+
+        history.record(&workflow);
+        assert!(!history.can_redo());
     }
 }
