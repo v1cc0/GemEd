@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "name": "Legacy Control Routing Fixture",
+  "edgeStyle": "angular",
+  "nodes": [
+    {
+      "id": "array-1",
+      "type": "array",
+      "position": { "x": 60, "y": 80 },
+      "data": {
+        "label": "Batch Prompts",
+        "items": ["ruby pendant", "emerald ring"],
+        "status": "complete"
+      }
+    },
+    {
+      "id": "router-1",
+      "type": "router",
+      "position": { "x": 360, "y": 80 },
+      "data": { "label": "Route", "status": "idle" }
+    },
+    {
+      "id": "switch-1",
+      "type": "conditionalSwitch",
+      "position": { "x": 660, "y": 40 },
+      "data": {
+        "label": "Conditional",
+        "incomingText": "ruby pendant",
+        "rules": [
+          { "id": "rule-ruby", "value": "ruby", "mode": "contains", "label": "Ruby", "isMatched": true },
+          { "id": "rule-other", "value": "emerald", "mode": "contains", "label": "Emerald", "isMatched": false }
+        ],
+        "status": "idle"
+      }
+    },
+    {
+      "id": "compare-1",
+      "type": "imageCompare",
+      "position": { "x": 960, "y": 40 },
+      "data": {
+        "label": "Compare",
+        "leftImage": "local://left.png",
+        "rightImage": "local://right.png",
+        "status": "idle"
+      }
+    },
+    {
+      "id": "unknown-legacy-node",
+      "type": "legacyPluginNode",
+      "position": { "x": 1260, "y": 120 },
+      "data": {
+        "label": "Legacy Plugin",
+        "status": "skipped",
+        "pluginPayload": { "kind": "third-party" }
+      },
+      "deletable": false
+    },
+    {
+      "id": "output-1",
+      "type": "output",
+      "position": { "x": 1540, "y": 120 },
+      "data": { "label": "Output", "status": "idle" }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-array-router",
+      "source": "array-1",
+      "target": "router-1",
+      "sourceHandle": "items",
+      "targetHandle": "input",
+      "data": { "hasPause": false }
+    },
+    {
+      "id": "edge-router-switch",
+      "source": "router-1",
+      "target": "switch-1",
+      "sourceHandle": "text",
+      "targetHandle": "text",
+      "data": { "isLoop": false }
+    },
+    {
+      "id": "edge-switch-compare",
+      "source": "switch-1",
+      "target": "compare-1",
+      "sourceHandle": "matched:rule-ruby",
+      "targetHandle": "image",
+      "data": { "hasPause": true }
+    },
+    {
+      "id": "edge-compare-legacy",
+      "source": "compare-1",
+      "target": "unknown-legacy-node",
+      "sourceHandle": "image",
+      "targetHandle": "input",
+      "data": { "createdAt": 1710000001000 }
+    },
+    {
+      "id": "edge-legacy-output",
+      "source": "unknown-legacy-node",
+      "target": "output-1",
+      "sourceHandle": "output",
+      "targetHandle": "input",
+      "data": {}
+    }
+  ]
+}

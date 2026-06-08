@@ -9,6 +9,7 @@ Implemented now:
 - Rust workspace with `gemed_core`, `gemed_executor`, `gemed_providers`, `gemed_storage`, and `gemed_app` crates
 - Dioxus app targeting web and desktop from one codebase
 - Workflow v1 schema for nodes, edges, groups, node statuses, and edge style
+- Representative legacy workflow JSON fixtures with import/roundtrip coverage in `gemed_core`
 - Typed node-handle metadata in `gemed_core` for canvas connection UI
 - Graph traversal, connected-input resolution, and topological execution ordering
 - Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, and control nodes

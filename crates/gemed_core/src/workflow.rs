@@ -239,7 +239,7 @@ pub struct Position {
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowEdge {
     pub id: String,
@@ -255,6 +255,45 @@ pub struct WorkflowEdge {
     pub data: WorkflowEdgeData,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for WorkflowEdge {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireWorkflowEdge {
+            id: String,
+            source: String,
+            target: String,
+            #[serde(default)]
+            source_handle: Option<String>,
+            #[serde(default)]
+            target_handle: Option<String>,
+            #[serde(default)]
+            edge_type: Option<String>,
+            #[serde(default, rename = "type")]
+            react_flow_type: Option<String>,
+            #[serde(default)]
+            data: WorkflowEdgeData,
+            #[serde(flatten)]
+            extra: IndexMap<String, Value>,
+        }
+
+        let wire = WireWorkflowEdge::deserialize(deserializer)?;
+        Ok(Self {
+            id: wire.id,
+            source: wire.source,
+            target: wire.target,
+            source_handle: wire.source_handle,
+            target_handle: wire.target_handle,
+            edge_type: wire.edge_type.or(wire.react_flow_type),
+            data: wire.data,
+            extra: wire.extra,
+        })
+    }
 }
 
 impl WorkflowEdge {
@@ -544,17 +583,47 @@ mod tests {
     }
 
     #[test]
-    fn current_examples_directory_has_no_workflow_json_yet() {
+    fn react_flow_edge_type_alias_imports_as_edge_type() {
+        let json = r#"
+        {
+          "version": 1,
+          "name": "edge type alias",
+          "nodes": [
+            { "id": "a", "type": "prompt", "position": { "x": 0, "y": 0 }, "data": {} },
+            { "id": "b", "type": "output", "position": { "x": 200, "y": 0 }, "data": {} }
+          ],
+          "edges": [
+            { "id": "e1", "source": "a", "target": "b", "type": "editable", "data": {} }
+          ]
+        }
+        "#;
+
+        let workflow = WorkflowFile::from_json_str(json).expect("workflow parses");
+        assert_eq!(workflow.edges[0].edge_type.as_deref(), Some("editable"));
+        let exported = workflow.to_pretty_json().expect("workflow exports");
+        assert!(exported.contains("\"edgeType\": \"editable\""));
+        assert!(!exported.contains("\"type\": \"editable\""));
+    }
+
+    #[test]
+    fn examples_directory_workflow_json_files_import_when_present() {
         let examples_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples");
-        let workflow_json_count = std::fs::read_dir(examples_dir)
+        for entry in std::fs::read_dir(examples_dir)
             .ok()
             .into_iter()
             .flatten()
             .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-            .count();
-        assert_eq!(workflow_json_count, 0);
+        {
+            let source = std::fs::read_to_string(entry.path()).expect("read example workflow JSON");
+            WorkflowFile::from_json_str(&source).unwrap_or_else(|err| {
+                panic!(
+                    "example workflow JSON `{}` failed to import: {err}",
+                    entry.path().display()
+                )
+            });
+        }
     }
 }

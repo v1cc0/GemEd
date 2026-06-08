@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "id": "wf_legacy_media_provider",
+  "name": "Legacy Media Provider Fixture",
+  "directoryPath": "/legacy/project",
+  "edgeStyle": "curved",
+  "nodes": [
+    {
+      "id": "image-input-1",
+      "type": "imageInput",
+      "position": { "x": 40, "y": 120 },
+      "width": 248,
+      "height": 132,
+      "selected": true,
+      "data": {
+        "label": "Product Image",
+        "status": "complete",
+        "image": "/sample-images/watch.jpg",
+        "filename": "watch.jpg",
+        "dimensions": { "width": 800, "height": 600 }
+      },
+      "groupId": "group-inputs",
+      "reactFlowMeasured": { "width": 248, "height": 132 }
+    },
+    {
+      "id": "prompt-1",
+      "type": "prompt",
+      "position": { "x": 42, "y": 330 },
+      "data": {
+        "label": "Prompt",
+        "prompt": "turn the product into a polished gemstone editorial shot",
+        "text": "turn the product into a polished gemstone editorial shot",
+        "status": "idle"
+      },
+      "groupId": "group-inputs"
+    },
+    {
+      "id": "generate-1",
+      "type": "nanoBanana",
+      "position": { "x": 410, "y": 190 },
+      "data": {
+        "label": "Gemini Image",
+        "provider": "gemini",
+        "modelId": "gemini-2.5-flash-image",
+        "status": "idle",
+        "parameters": { "temperature": 0.6 }
+      }
+    },
+    {
+      "id": "llm-1",
+      "type": "llmGenerate",
+      "position": { "x": 760, "y": 160 },
+      "data": {
+        "label": "Caption",
+        "provider": "openai",
+        "selectedModel": {
+          "provider": "openai",
+          "modelId": "gpt-4.1-mini",
+          "displayName": "GPT 4.1 mini"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "gallery-1",
+      "type": "outputGallery",
+      "position": { "x": 1100, "y": 200 },
+      "data": {
+        "label": "Gallery",
+        "status": "idle",
+        "items": []
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-image-generate",
+      "source": "image-input-1",
+      "target": "generate-1",
+      "sourceHandle": "image",
+      "targetHandle": "image",
+      "type": "editable",
+      "data": {
+        "hasPause": true,
+        "createdAt": 1710000000000,
+        "offsetX": 12,
+        "offsetY": -6
+      }
+    },
+    {
+      "id": "edge-prompt-generate",
+      "source": "prompt-1",
+      "target": "generate-1",
+      "sourceHandle": "text",
+      "targetHandle": "prompt",
+      "data": { "hasPause": false }
+    },
+    {
+      "id": "edge-generate-gallery",
+      "source": "generate-1",
+      "target": "gallery-1",
+      "sourceHandle": "image",
+      "targetHandle": "image",
+      "edgeType": "smoothstep",
+      "data": { "loopCount": 1 }
+    },
+    {
+      "id": "edge-llm-gallery",
+      "source": "llm-1",
+      "target": "gallery-1",
+      "sourceHandle": "text",
+      "targetHandle": "caption",
+      "data": {}
+    }
+  ],
+  "groups": {
+    "group-inputs": {
+      "id": "group-inputs",
+      "name": "Inputs",
+      "color": "blue",
+      "position": { "x": 12, "y": 70 },
+      "size": { "width": 340, "height": 440 },
+      "locked": false,
+      "isNbpInput": true,
+      "legacyCollapsed": false
+    }
+  },
+  "viewport": { "x": 120, "y": 40, "zoom": 0.85 }
+}
