@@ -34,11 +34,11 @@ const APP_CSS: &str = r#"
 body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #1f2a44 0, #0b1020 36rem); }
 button, textarea { font: inherit; }
 .app { min-height: 100vh; display: flex; flex-direction: column; }
-.header { height: 4.5rem; display: flex; align-items: center; justify-content: space-between; padding: 0 1.5rem; border-bottom: 1px solid rgba(148, 163, 184, .18); background: rgba(11, 16, 32, .78); backdrop-filter: blur(14px); }
+.header { min-height: 4.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem 1.5rem; border-bottom: 1px solid rgba(148, 163, 184, .18); background: rgba(11, 16, 32, .78); backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: baseline; gap: .75rem; }
 .brand h1 { margin: 0; font-size: 1.45rem; letter-spacing: -.03em; }
 .brand span { color: #93a4c8; font-size: .9rem; }
-.actions { display: flex; gap: .65rem; align-items: center; }
+.actions { display: flex; gap: .65rem; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .action { border: 1px solid rgba(148, 163, 184, .28); background: rgba(15, 23, 42, .82); color: #dce6ff; border-radius: .75rem; padding: .58rem .82rem; cursor: pointer; }
 .action.primary { border-color: rgba(96, 165, 250, .65); background: linear-gradient(135deg, #2563eb, #7c3aed); color: white; }
 .action:disabled { opacity: .55; cursor: not-allowed; }
@@ -438,6 +438,55 @@ fn DesktopFileActions(
                     }
                 },
                 "Save As"
+            }
+            button {
+                class: "action",
+                onclick: move |_| match open_project_from_dialog() {
+                    Ok(Some(snapshot)) => match snapshot.workflow.to_pretty_json() {
+                        Ok(json) => {
+                            let summary = format!(
+                                "Opened project `{}` from `{}` using `{}`.",
+                                snapshot.manifest.name,
+                                snapshot.root.display(),
+                                snapshot.manifest.workflow_file
+                            );
+                            workflow.set(snapshot.workflow);
+                            json_text.set(json);
+                            execution_report.set(None);
+                            undo_stack.write().clear();
+                            drag_state.set(None);
+                            connection_draft.set(None);
+                            message.set(Message::ok(summary));
+                        }
+                        Err(err) => message.set(Message::err(format!(
+                            "Opened project but failed to export JSON: {err}"
+                        ))),
+                    },
+                    Ok(None) => message.set(Message::ok("Open Project cancelled.")),
+                    Err(err) => message.set(Message::err(format!("Open Project failed: {err}"))),
+                },
+                "Open Project"
+            }
+            button {
+                class: "action",
+                onclick: move |_| {
+                    let current = workflow.read().clone();
+                    match save_project_to_dialog(&current) {
+                        Ok(Some((snapshot, json))) => {
+                            json_text.set(json);
+                            message.set(Message::ok(format!(
+                                "Saved project `{}` to `{}` with `{}` and `{}/`.",
+                                snapshot.manifest.name,
+                                snapshot.root.display(),
+                                snapshot.manifest.workflow_file,
+                                snapshot.manifest.media_dir
+                            )));
+                        }
+                        Ok(None) => message.set(Message::ok("Save Project cancelled.")),
+                        Err(err) => message.set(Message::err(format!("Save Project failed: {err}"))),
+                    }
+                },
+                "Save Project"
             }
         }
     }
@@ -2300,6 +2349,34 @@ fn save_workflow_to_dialog(
     std::fs::write(&path, json.as_bytes())
         .map_err(|err| format!("failed to write `{}`: {err}", path.display()))?;
     Ok(Some((path, json)))
+}
+
+#[cfg(feature = "desktop")]
+fn open_project_from_dialog()
+-> Result<Option<gemed_storage::desktop::WorkflowProjectSnapshot>, String> {
+    let Some(root) = rfd::FileDialog::new().pick_folder() else {
+        return Ok(None);
+    };
+    gemed_storage::desktop::DesktopWorkflowProject::at_dir(root)
+        .load()
+        .map(Some)
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "desktop")]
+fn save_project_to_dialog(
+    workflow: &WorkflowFile,
+) -> Result<Option<(gemed_storage::desktop::WorkflowProjectSnapshot, String)>, String> {
+    let Some(root) = rfd::FileDialog::new().pick_folder() else {
+        return Ok(None);
+    };
+    let snapshot = gemed_storage::desktop::DesktopWorkflowProject::at_dir(root)
+        .save(workflow)
+        .map_err(|err| err.to_string())?;
+    let json = workflow
+        .to_pretty_json()
+        .map_err(|err| format!("failed to refresh project workflow JSON: {err}"))?;
+    Ok(Some((snapshot, json)))
 }
 
 #[cfg(feature = "desktop")]

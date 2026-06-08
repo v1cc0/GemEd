@@ -1,8 +1,33 @@
 use gemed_core::{WorkflowError, WorkflowFile};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const DEFAULT_AUTOSAVE_SLOT: &str = "autosave";
+pub const PROJECT_SCHEMA_VERSION: u8 = 1;
+pub const PROJECT_MANIFEST_FILE: &str = "gemed-project.json";
+pub const PROJECT_WORKFLOW_FILE: &str = "workflow.json";
+pub const PROJECT_MEDIA_DIR: &str = "media";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProjectManifest {
+    pub version: u8,
+    pub name: String,
+    pub workflow_file: String,
+    pub media_dir: String,
+}
+
+impl WorkflowProjectManifest {
+    pub fn from_workflow(workflow: &WorkflowFile) -> Self {
+        Self {
+            version: PROJECT_SCHEMA_VERSION,
+            name: workflow.name.clone(),
+            workflow_file: PROJECT_WORKFLOW_FILE.to_string(),
+            media_dir: PROJECT_MEDIA_DIR.to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowSnapshot {
@@ -108,12 +133,13 @@ impl WorkflowStorage for MemoryWorkflowStorage {
 #[cfg(feature = "desktop")]
 pub mod desktop {
     use super::{
-        DEFAULT_AUTOSAVE_SLOT, Result, StorageError, WorkflowSnapshot, WorkflowStorage,
+        DEFAULT_AUTOSAVE_SLOT, PROJECT_MANIFEST_FILE, PROJECT_MEDIA_DIR, PROJECT_WORKFLOW_FILE,
+        Result, StorageError, WorkflowProjectManifest, WorkflowSnapshot, WorkflowStorage,
         normalize_slot,
     };
     use directories::ProjectDirs;
     use gemed_core::WorkflowFile;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     #[derive(Debug, Clone)]
     pub struct DesktopWorkflowStorage {
@@ -219,6 +245,152 @@ pub mod desktop {
             }
             std::fs::remove_file(&path).map_err(|source| StorageError::Io { path, source })
         }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WorkflowProjectSnapshot {
+        pub root: PathBuf,
+        pub manifest: WorkflowProjectManifest,
+        pub workflow: WorkflowFile,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DesktopWorkflowProject {
+        root: PathBuf,
+    }
+
+    impl DesktopWorkflowProject {
+        pub fn at_dir(root: impl Into<PathBuf>) -> Self {
+            Self { root: root.into() }
+        }
+
+        pub fn root(&self) -> &Path {
+            &self.root
+        }
+
+        pub fn manifest_path(&self) -> PathBuf {
+            self.root.join(PROJECT_MANIFEST_FILE)
+        }
+
+        pub fn default_workflow_path(&self) -> PathBuf {
+            self.root.join(PROJECT_WORKFLOW_FILE)
+        }
+
+        pub fn default_media_dir(&self) -> PathBuf {
+            self.root.join(PROJECT_MEDIA_DIR)
+        }
+
+        pub fn save(&self, workflow: &WorkflowFile) -> Result<WorkflowProjectSnapshot> {
+            std::fs::create_dir_all(&self.root).map_err(|source| StorageError::Io {
+                path: self.root.clone(),
+                source,
+            })?;
+            std::fs::create_dir_all(self.default_media_dir()).map_err(|source| {
+                StorageError::Io {
+                    path: self.default_media_dir(),
+                    source,
+                }
+            })?;
+
+            let manifest = WorkflowProjectManifest::from_workflow(workflow);
+            let workflow_json = workflow.to_pretty_json()?;
+            std::fs::write(self.default_workflow_path(), workflow_json.as_bytes()).map_err(
+                |source| StorageError::Io {
+                    path: self.default_workflow_path(),
+                    source,
+                },
+            )?;
+            let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|source| {
+                StorageError::Backend(format!("project manifest export failed: {source}"))
+            })?;
+            std::fs::write(self.manifest_path(), manifest_json.as_bytes()).map_err(|source| {
+                StorageError::Io {
+                    path: self.manifest_path(),
+                    source,
+                }
+            })?;
+
+            Ok(WorkflowProjectSnapshot {
+                root: self.root.clone(),
+                manifest,
+                workflow: workflow.clone(),
+            })
+        }
+
+        pub fn load(&self) -> Result<WorkflowProjectSnapshot> {
+            let manifest_path = self.manifest_path();
+            let manifest = if manifest_path.exists() {
+                let json =
+                    std::fs::read_to_string(&manifest_path).map_err(|source| StorageError::Io {
+                        path: manifest_path.clone(),
+                        source,
+                    })?;
+                serde_json::from_str::<WorkflowProjectManifest>(&json).map_err(|source| {
+                    StorageError::Backend(format!(
+                        "project manifest parse failed at `{}`: {source}",
+                        manifest_path.display()
+                    ))
+                })?
+            } else {
+                WorkflowProjectManifest {
+                    version: super::PROJECT_SCHEMA_VERSION,
+                    name: String::new(),
+                    workflow_file: PROJECT_WORKFLOW_FILE.to_string(),
+                    media_dir: PROJECT_MEDIA_DIR.to_string(),
+                }
+            };
+
+            let workflow_path = safe_project_child(&self.root, &manifest.workflow_file)?;
+            let json =
+                std::fs::read_to_string(&workflow_path).map_err(|source| StorageError::Io {
+                    path: workflow_path.clone(),
+                    source,
+                })?;
+            let workflow = WorkflowFile::from_json_str(&json)?;
+            let manifest = if manifest.name.trim().is_empty() {
+                WorkflowProjectManifest {
+                    name: workflow.name.clone(),
+                    ..manifest
+                }
+            } else {
+                manifest
+            };
+            let _ = safe_project_child(&self.root, &manifest.media_dir)?;
+
+            Ok(WorkflowProjectSnapshot {
+                root: self.root.clone(),
+                manifest,
+                workflow,
+            })
+        }
+    }
+
+    fn safe_project_child(root: &Path, value: &str) -> Result<PathBuf> {
+        let relative = Path::new(value);
+        if value.trim().is_empty() || relative.is_absolute() {
+            return Err(StorageError::Backend(format!(
+                "project path `{value}` must be relative"
+            )));
+        }
+
+        let mut clean = PathBuf::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(part) => clean.push(part),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(StorageError::Backend(format!(
+                        "project path `{value}` must stay inside the project directory"
+                    )));
+                }
+            }
+        }
+        if clean.as_os_str().is_empty() {
+            return Err(StorageError::Backend(format!(
+                "project path `{value}` must name a file or directory"
+            )));
+        }
+        Ok(root.join(clean))
     }
 }
 
@@ -422,5 +594,69 @@ mod tests {
         assert!(storage.autosave_path().unwrap().ends_with("autosave.json"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_saves_manifest_workflow_and_media_dir() {
+        let workflow = WorkflowFile::example();
+        let root = unique_temp_dir("gemed-project-save-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let snapshot = project.save(&workflow).expect("save project");
+
+        assert_eq!(snapshot.root, root);
+        assert_eq!(snapshot.manifest.name, workflow.name);
+        assert_eq!(snapshot.manifest.workflow_file, PROJECT_WORKFLOW_FILE);
+        assert_eq!(snapshot.manifest.media_dir, PROJECT_MEDIA_DIR);
+        assert!(root.join(PROJECT_MANIFEST_FILE).is_file());
+        assert!(root.join(PROJECT_WORKFLOW_FILE).is_file());
+        assert!(root.join(PROJECT_MEDIA_DIR).is_dir());
+
+        let loaded = project.load().expect("load project");
+        assert_eq!(loaded.workflow.name, workflow.name);
+        assert_eq!(loaded.workflow.nodes.len(), workflow.nodes.len());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_load_rejects_manifest_parent_paths() {
+        let root = unique_temp_dir("gemed-project-path-test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(PROJECT_MANIFEST_FILE),
+            serde_json::to_string_pretty(&WorkflowProjectManifest {
+                version: PROJECT_SCHEMA_VERSION,
+                name: "bad".to_string(),
+                workflow_file: "../workflow.json".to_string(),
+                media_dir: PROJECT_MEDIA_DIR.to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = desktop::DesktopWorkflowProject::at_dir(&root)
+            .load()
+            .expect_err("unsafe manifest path rejected");
+        assert!(
+            matches!(err, StorageError::Backend(message) if message.contains("inside the project directory"))
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "{}-{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
     }
 }
