@@ -15,7 +15,9 @@ Implemented now:
 - JSON editor that loads and validates workflow JSON
 - Read-only SVG/HTML canvas rendering nodes and edges
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
+- Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
+- Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Web and Linux desktop build verification
 - Windows desktop foundation through Dioxus desktop feature and Windows GUI subsystem setting
 
@@ -24,7 +26,7 @@ Not implemented yet:
 - Editable drag/connect canvas
 - Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
-- Native file dialogs and persistent project storage
+- Native file dialogs, explicit project picker/save-as flows, and external media storage
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 

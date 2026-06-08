@@ -5,6 +5,7 @@ use gemed_executor::{
     execution_order,
 };
 use gemed_providers::ProviderRegistry;
+use gemed_storage::{DEFAULT_AUTOSAVE_SLOT, WorkflowSnapshot, WorkflowStorage};
 
 const APP_CSS: &str = r#"
 :root {
@@ -216,6 +217,47 @@ fn Header(
                     },
                     "Export JSON"
                 }
+                button {
+                    class: "action",
+                    onclick: move |_| {
+                        let current = workflow.read().clone();
+                        match save_autosave_workflow(&current) {
+                            Ok(snapshot) => {
+                                message.set(Message::ok(format!(
+                                    "Saved `{}` to {} slot `{}`.",
+                                    snapshot.name,
+                                    storage_backend_label(),
+                                    snapshot.slot
+                                )));
+                            }
+                            Err(err) => message.set(Message::err(format!("Save failed: {err}"))),
+                        }
+                    },
+                    "Save Slot"
+                }
+                button {
+                    class: "action",
+                    onclick: move |_| {
+                        match load_autosave_workflow() {
+                            Ok(next) => match next.to_pretty_json() {
+                                Ok(json) => {
+                                    workflow.set(next);
+                                    json_text.set(json);
+                                    execution_report.set(None);
+                                    message.set(Message::ok(format!(
+                                        "Loaded {} slot `{DEFAULT_AUTOSAVE_SLOT}`.",
+                                        storage_backend_label()
+                                    )));
+                                }
+                                Err(err) => message.set(Message::err(format!(
+                                    "Loaded slot but failed to export JSON: {err}"
+                                ))),
+                            },
+                            Err(err) => message.set(Message::err(format!("Load slot failed: {err}"))),
+                        }
+                    },
+                    "Load Slot"
+                }
             }
         }
     }
@@ -378,6 +420,38 @@ fn edge_path(workflow: &WorkflowFile, edge: &gemed_core::WorkflowEdge) -> Option
         cx1 = x1 + mid,
         cx2 = x2 - mid
     ))
+}
+
+fn save_autosave_workflow(
+    workflow: &WorkflowFile,
+) -> Result<WorkflowSnapshot, gemed_storage::StorageError> {
+    let mut storage = platform_storage()?;
+    storage.save_workflow(DEFAULT_AUTOSAVE_SLOT, workflow)
+}
+
+fn load_autosave_workflow() -> Result<WorkflowFile, gemed_storage::StorageError> {
+    platform_storage()?.load_workflow(DEFAULT_AUTOSAVE_SLOT)
+}
+
+#[cfg(feature = "desktop")]
+fn platform_storage()
+-> Result<gemed_storage::desktop::DesktopWorkflowStorage, gemed_storage::StorageError> {
+    gemed_storage::desktop::DesktopWorkflowStorage::new()
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn platform_storage() -> Result<gemed_storage::web::WebLocalStorage, gemed_storage::StorageError> {
+    Ok(gemed_storage::web::WebLocalStorage::new())
+}
+
+#[cfg(feature = "desktop")]
+fn storage_backend_label() -> &'static str {
+    "desktop filesystem"
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn storage_backend_label() -> &'static str {
+    "browser localStorage"
 }
 
 #[derive(Clone, PartialEq)]

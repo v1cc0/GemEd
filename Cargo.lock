@@ -1287,6 +1287,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1805,6 +1814,7 @@ dependencies = [
  "gemed_core",
  "gemed_executor",
  "gemed_providers",
+ "gemed_storage",
  "serde_json",
  "wasm-bindgen",
  "web-sys",
@@ -1844,6 +1854,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gemed_storage"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "gemed_core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "web-sys",
 ]
 
 [[package]]
