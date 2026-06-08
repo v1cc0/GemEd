@@ -1,13 +1,14 @@
 use dioxus::html::{
-    InteractionLocation, MouseEvent, PointerInteraction, WheelEvent, geometry::WheelDelta,
-    input_data::MouseButton,
+    InteractionLocation, ModifiersInteraction, MouseEvent, PointerInteraction, WheelEvent,
+    geometry::WheelDelta, input_data::MouseButton,
 };
 use dioxus::prelude::*;
 use gemed_core::{
     GroupColor, NodeGroup, NodeStatus, Position, WorkflowEdge, WorkflowFile, WorkflowNode,
-    WorkflowUndoStack, add_edge_between, is_node_in_locked_group, move_node_by, remove_edge,
-    select_node, selected_node_id, set_node_position, source_handle_options, target_handle_options,
-    toggle_group_lock,
+    WorkflowUndoStack, add_edge_between, create_group_for_nodes, is_node_in_locked_group,
+    move_node_by, remove_edge, resize_group_by, select_node, selected_node_id, selected_node_ids,
+    set_node_position, source_handle_options, target_handle_options, toggle_group_lock,
+    toggle_node_selection,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -359,24 +360,33 @@ fn Sidebar(
     let viewport_snapshot = *viewport.read();
     let zoom_percent = (viewport_snapshot.zoom * 100.0).round() as i32;
     let selected_id = selected_node_id(&wf).map(ToOwned::to_owned);
+    let selected_ids = selected_node_ids(&wf)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let selected_count = selected_ids.len();
     let selected_index = selected_id
         .as_ref()
         .and_then(|id| wf.nodes.iter().position(|node| node.id == *id));
     let next_node_id = selected_index.and_then(|index| {
         (!wf.nodes.is_empty()).then(|| wf.nodes[(index + 1) % wf.nodes.len()].id.clone())
     });
-    let selected_summary = selected_id
-        .as_ref()
-        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
-        .map(|node| {
-            format!(
-                "{} at ({:.0}, {:.0})",
-                node.display_label(),
-                node.position.x,
-                node.position.y
-            )
-        })
-        .unwrap_or_else(|| "No node selected. Click a card in the canvas.".to_string());
+    let selected_summary = match selected_count {
+        0 => "No node selected. Click a card in the canvas.".to_string(),
+        1 => selected_id
+            .as_ref()
+            .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+            .map(|node| {
+                format!(
+                    "{} at ({:.0}, {:.0})",
+                    node.display_label(),
+                    node.position.x,
+                    node.position.y
+                )
+            })
+            .unwrap_or_else(|| "1 node selected.".to_string()),
+        count => format!("{count} nodes selected: {}.", selected_ids.join(", ")),
+    };
     let draft_summary = connection_draft
         .read()
         .as_ref()
@@ -430,16 +440,26 @@ fn Sidebar(
                     div { class: "edge-list",
                         for group in wf.groups.values() {
                             {
-                                let group_id = group.id.clone();
+                                let lock_group_id = group.id.clone();
+                                let widen_group_id = group.id.clone();
+                                let narrow_group_id = group.id.clone();
+                                let taller_group_id = group.id.clone();
+                                let shorter_group_id = group.id.clone();
                                 let label = if group.locked.unwrap_or(false) { "Unlock" } else { "Lock" };
                                 let state = if group.locked.unwrap_or(false) { "locked" } else { "unlocked" };
+                                let group_summary = format!(
+                                    "{} · {state} · {:.0}×{:.0}",
+                                    group.name,
+                                    group.size.width,
+                                    group.size.height
+                                );
                                 rsx! {
                                     div { class: "edge-row",
-                                        code { "{group.name} · {state}" }
+                                        code { "{group_summary}" }
                                         button {
                                             class: "mini-action neutral",
                                             onclick: move |_| {
-                                                let group_id = group_id.clone();
+                                                let group_id = lock_group_id.clone();
                                                 toggle_group_lock_by_id(
                                                     &group_id,
                                                     &mut workflow,
@@ -449,6 +469,82 @@ fn Sidebar(
                                                 );
                                             },
                                             "{label}"
+                                        }
+                                        button {
+                                            class: "mini-action neutral",
+                                            title: "Wider",
+                                            onclick: move |_| {
+                                                let group_id = widen_group_id.clone();
+                                                resize_group_by_id(
+                                                    &group_id,
+                                                    48.0,
+                                                    0.0,
+                                                    GroupEditSignals {
+                                                        workflow,
+                                                        json_text,
+                                                        message,
+                                                        undo_stack,
+                                                    },
+                                                );
+                                            },
+                                            "W+"
+                                        }
+                                        button {
+                                            class: "mini-action neutral",
+                                            title: "Narrower",
+                                            onclick: move |_| {
+                                                let group_id = narrow_group_id.clone();
+                                                resize_group_by_id(
+                                                    &group_id,
+                                                    -48.0,
+                                                    0.0,
+                                                    GroupEditSignals {
+                                                        workflow,
+                                                        json_text,
+                                                        message,
+                                                        undo_stack,
+                                                    },
+                                                );
+                                            },
+                                            "W-"
+                                        }
+                                        button {
+                                            class: "mini-action neutral",
+                                            title: "Taller",
+                                            onclick: move |_| {
+                                                let group_id = taller_group_id.clone();
+                                                resize_group_by_id(
+                                                    &group_id,
+                                                    0.0,
+                                                    48.0,
+                                                    GroupEditSignals {
+                                                        workflow,
+                                                        json_text,
+                                                        message,
+                                                        undo_stack,
+                                                    },
+                                                );
+                                            },
+                                            "H+"
+                                        }
+                                        button {
+                                            class: "mini-action neutral",
+                                            title: "Shorter",
+                                            onclick: move |_| {
+                                                let group_id = shorter_group_id.clone();
+                                                resize_group_by_id(
+                                                    &group_id,
+                                                    0.0,
+                                                    -48.0,
+                                                    GroupEditSignals {
+                                                        workflow,
+                                                        json_text,
+                                                        message,
+                                                        undo_stack,
+                                                    },
+                                                );
+                                            },
+                                            "H-"
                                         }
                                     }
                                 }
@@ -461,6 +557,9 @@ fn Sidebar(
             section { class: "panel",
                 h2 { "Canvas MVP" }
                 p { "{selected_summary}" }
+                p { class: "handle-hint",
+                    "Ctrl/Cmd-click nodes to add or remove them from the selection; drag a selected node or use arrows to move the whole selection."
+                }
                 div { class: "edit-grid",
                     button {
                         class: "action",
@@ -482,7 +581,24 @@ fn Sidebar(
                     }
                     button {
                         class: "action",
-                        disabled: selected_id.is_none(),
+                        disabled: selected_count == 0,
+                        onclick: move |_| {
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, |workflow| {
+                                let selected_ids = selected_node_ids(workflow)
+                                    .into_iter()
+                                    .map(ToOwned::to_owned)
+                                    .collect::<Vec<_>>();
+                                let count = selected_ids.len();
+                                let group = create_group_for_nodes(workflow, &selected_ids)
+                                    .map_err(|err| err.to_string())?;
+                                Ok(format!("Created group `{}` for {count} node(s).", group.name))
+                            });
+                        },
+                        "Create Group"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_count == 0,
                         onclick: move |_| {
                             mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, -32.0, 0.0);
                         },
@@ -490,7 +606,7 @@ fn Sidebar(
                     }
                     button {
                         class: "action",
-                        disabled: selected_id.is_none(),
+                        disabled: selected_count == 0,
                         onclick: move |_| {
                             mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 32.0, 0.0);
                         },
@@ -498,7 +614,7 @@ fn Sidebar(
                     }
                     button {
                         class: "action",
-                        disabled: selected_id.is_none(),
+                        disabled: selected_count == 0,
                         onclick: move |_| {
                             mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 0.0, -32.0);
                         },
@@ -506,7 +622,7 @@ fn Sidebar(
                     }
                     button {
                         class: "action",
-                        disabled: selected_id.is_none(),
+                        disabled: selected_count == 0,
                         onclick: move |_| {
                             mutate_selected_node(&mut workflow, &mut json_text, &mut message, &mut undo_stack, 0.0, 32.0);
                         },
@@ -959,22 +1075,18 @@ fn NodeCard(
             style: "{style}",
             onmousedown: move |event: MouseEvent| {
                 event.stop_propagation();
-                if locked {
-                    message.set(Message::err(format!(
-                        "`{}` is in a locked group. Unlock the group before moving it.",
-                        node_id
-                    )));
-                    return;
-                }
                 let node_id = node_id.clone();
                 begin_node_drag(
                     event,
                     &node_id,
-                    &mut workflow,
-                    &mut json_text,
-                    &mut undo_stack,
-                    drag_state,
-                    viewport,
+                    NodeDragSignals {
+                        workflow,
+                        json_text,
+                        undo_stack,
+                        drag_state,
+                        viewport,
+                        message,
+                    },
                 );
             },
             div { class: "handle-column target",
@@ -1219,6 +1331,33 @@ fn toggle_group_lock_by_id(
     });
 }
 
+fn resize_group_by_id(
+    group_id: &str,
+    width_delta: f64,
+    height_delta: f64,
+    signals: GroupEditSignals,
+) {
+    let mut workflow = signals.workflow;
+    let mut json_text = signals.json_text;
+    let mut message = signals.message;
+    let mut undo_stack = signals.undo_stack;
+    let group_id = group_id.to_string();
+    mutate_workflow(
+        &mut workflow,
+        &mut json_text,
+        &mut message,
+        &mut undo_stack,
+        move |workflow| {
+            let size = resize_group_by(workflow, &group_id, width_delta, height_delta)
+                .map_err(|err| err.to_string())?;
+            Ok(format!(
+                "Resized group `{group_id}` to {:.0}×{:.0}.",
+                size.width, size.height
+            ))
+        },
+    );
+}
+
 fn begin_handle_connection(
     source_node_id: &str,
     source_handle: &str,
@@ -1295,19 +1434,41 @@ fn mutate_selected_node(
     dy: f64,
 ) {
     mutate_workflow(workflow, json_text, message, undo_stack, |workflow| {
-        let Some(node_id) = selected_node_id(workflow).map(ToOwned::to_owned) else {
+        let selected_ids = selected_node_ids(workflow)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if selected_ids.is_empty() {
             return Err("Select a node before moving it.".to_string());
-        };
-        if is_node_in_locked_group(workflow, &node_id) {
+        }
+
+        let locked_ids = locked_node_ids(workflow, &selected_ids);
+        if !locked_ids.is_empty() {
             return Err(format!(
-                "`{node_id}` is in a locked group. Unlock the group before moving it."
+                "Selection contains locked node(s): {}. Unlock their group before moving.",
+                locked_ids.join(", ")
             ));
         }
-        let position = move_node_by(workflow, &node_id, dx, dy).map_err(|err| err.to_string())?;
-        Ok(format!(
-            "Moved `{node_id}` to ({:.0}, {:.0}).",
-            position.x, position.y
-        ))
+
+        let mut last_position = None;
+        for node_id in &selected_ids {
+            last_position =
+                Some(move_node_by(workflow, node_id, dx, dy).map_err(|err| err.to_string())?);
+        }
+
+        if selected_ids.len() == 1 {
+            let node_id = &selected_ids[0];
+            let position = last_position.expect("single selected node was moved");
+            Ok(format!(
+                "Moved `{node_id}` to ({:.0}, {:.0}).",
+                position.x, position.y
+            ))
+        } else {
+            Ok(format!(
+                "Moved {} selected nodes by ({dx:.0}, {dy:.0}).",
+                selected_ids.len()
+            ))
+        }
     });
 }
 
@@ -1340,26 +1501,82 @@ fn mutate_workflow<F>(
     }
 }
 
-fn begin_node_drag(
-    event: MouseEvent,
-    node_id: &str,
-    workflow: &mut Signal<WorkflowFile>,
-    json_text: &mut Signal<String>,
-    undo_stack: &mut Signal<WorkflowUndoStack>,
-    mut drag_state: Signal<Option<DragState>>,
-    viewport: Signal<CanvasViewport>,
-) {
+fn begin_node_drag(event: MouseEvent, node_id: &str, signals: NodeDragSignals) {
+    let mut workflow = signals.workflow;
+    let mut json_text = signals.json_text;
+    let mut undo_stack = signals.undo_stack;
+    let mut drag_state = signals.drag_state;
+    let viewport = signals.viewport;
+    let mut message = signals.message;
     let before = workflow.read().clone();
     let Some(node) = before.nodes.iter().find(|node| node.id == node_id) else {
         return;
     };
     let point = event.data().client_coordinates();
     let viewport = *viewport.read();
+    let additive_selection = is_additive_selection(&event);
     let mut next = before.clone();
-    if select_node(&mut next, Some(node_id)).is_err() {
+
+    if additive_selection {
+        let Ok(selected) = toggle_node_selection(&mut next, node_id) else {
+            return;
+        };
+        if let Ok(json) = next.to_pretty_json() {
+            if next != before {
+                undo_stack.write().record(&before);
+            }
+            workflow.set(next);
+            json_text.set(json);
+            message.set(Message::ok(format!(
+                "{} `{node_id}` {} the selection.",
+                if selected { "Added" } else { "Removed" },
+                if selected { "to" } else { "from" }
+            )));
+        }
         return;
     }
-    set_node_dragging(&mut next, node_id, true);
+
+    let node_was_selected = node.selected.unwrap_or(false);
+    if !node_was_selected && select_node(&mut next, Some(node_id)).is_err() {
+        return;
+    }
+
+    let selected_ids = selected_node_ids(&next)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let locked_ids = locked_node_ids(&next, &selected_ids);
+    if !locked_ids.is_empty() {
+        if let Ok(json) = next.to_pretty_json() {
+            if next != before {
+                undo_stack.write().record(&before);
+            }
+            workflow.set(next);
+            json_text.set(json);
+        }
+        drag_state.set(None);
+        message.set(Message::err(format!(
+            "Selection contains locked node(s): {}. Unlock their group before moving.",
+            locked_ids.join(", ")
+        )));
+        return;
+    }
+
+    for selected_id in &selected_ids {
+        set_node_dragging(&mut next, selected_id, true);
+    }
+    let start_positions = selected_ids
+        .iter()
+        .filter_map(|selected_id| {
+            next.nodes
+                .iter()
+                .find(|node| node.id == *selected_id)
+                .map(|node| DraggedNodeStart {
+                    node_id: selected_id.clone(),
+                    start_position: node.position,
+                })
+        })
+        .collect::<Vec<_>>();
 
     if let Ok(json) = next.to_pretty_json() {
         if next != before {
@@ -1371,7 +1588,7 @@ fn begin_node_drag(
             node_id: node_id.to_string(),
             start_client_x: point.x,
             start_client_y: point.y,
-            start_position: node.position,
+            start_positions,
             start_viewport: viewport,
         }));
     }
@@ -1388,15 +1605,19 @@ fn update_dragged_node(
     };
     let point = event.data().client_coordinates();
     let zoom = drag.start_viewport.zoom;
-    let next_position = Position {
-        x: drag.start_position.x + (point.x - drag.start_client_x) / zoom,
-        y: drag.start_position.y + (point.y - drag.start_client_y) / zoom,
-    };
+    let dx = (point.x - drag.start_client_x) / zoom;
+    let dy = (point.y - drag.start_client_y) / zoom;
     let mut next = workflow.read().clone();
-    if set_node_position(&mut next, &drag.node_id, next_position).is_err() {
-        return;
+    for origin in &drag.start_positions {
+        let next_position = Position {
+            x: origin.start_position.x + dx,
+            y: origin.start_position.y + dy,
+        };
+        if set_node_position(&mut next, &origin.node_id, next_position).is_err() {
+            return;
+        }
+        set_node_dragging(&mut next, &origin.node_id, true);
     }
-    set_node_dragging(&mut next, &drag.node_id, true);
     if let Ok(json) = next.to_pretty_json() {
         workflow.set(next);
         json_text.set(json);
@@ -1414,7 +1635,9 @@ fn finish_drag(
     };
     drag_state.set(None);
     let mut next = workflow.read().clone();
-    set_node_dragging(&mut next, &drag.node_id, false);
+    for origin in &drag.start_positions {
+        set_node_dragging(&mut next, &origin.node_id, false);
+    }
     let Some(node) = next.nodes.iter().find(|node| node.id == drag.node_id) else {
         message.set(Message::err(format!(
             "Dragged node `{}` disappeared.",
@@ -1422,10 +1645,14 @@ fn finish_drag(
         )));
         return;
     };
-    let summary = format!(
-        "Moved `{}` to ({:.0}, {:.0}).",
-        drag.node_id, node.position.x, node.position.y
-    );
+    let summary = if drag.start_positions.len() == 1 {
+        format!(
+            "Moved `{}` to ({:.0}, {:.0}).",
+            drag.node_id, node.position.x, node.position.y
+        )
+    } else {
+        format!("Moved {} selected nodes.", drag.start_positions.len())
+    };
     match next.to_pretty_json() {
         Ok(json) => {
             workflow.set(next);
@@ -1502,6 +1729,19 @@ fn normalized_wheel_delta_y(delta: WheelDelta) -> f64 {
         WheelDelta::Lines(delta) => delta.y * 36.0,
         WheelDelta::Pages(delta) => delta.y * 720.0,
     }
+}
+
+fn is_additive_selection(event: &MouseEvent) -> bool {
+    let modifiers = event.data().modifiers();
+    modifiers.ctrl() || modifiers.meta()
+}
+
+fn locked_node_ids(workflow: &WorkflowFile, node_ids: &[String]) -> Vec<String> {
+    node_ids
+        .iter()
+        .filter(|node_id| is_node_in_locked_group(workflow, node_id))
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -1648,8 +1888,32 @@ struct DragState {
     node_id: String,
     start_client_x: f64,
     start_client_y: f64,
-    start_position: Position,
+    start_positions: Vec<DraggedNodeStart>,
     start_viewport: CanvasViewport,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DraggedNodeStart {
+    node_id: String,
+    start_position: Position,
+}
+
+#[derive(Clone, Copy)]
+struct NodeDragSignals {
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    undo_stack: Signal<WorkflowUndoStack>,
+    drag_state: Signal<Option<DragState>>,
+    viewport: Signal<CanvasViewport>,
+    message: Signal<Message>,
+}
+
+#[derive(Clone, Copy)]
+struct GroupEditSignals {
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    message: Signal<Message>,
+    undo_stack: Signal<WorkflowUndoStack>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

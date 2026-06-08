@@ -1,6 +1,15 @@
-use crate::{Position, WorkflowEdge, WorkflowFile};
+use crate::{GroupColor, NodeGroup, Position, Size, WorkflowEdge, WorkflowFile};
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
+
+const DEFAULT_NODE_WIDTH: f64 = 248.0;
+const DEFAULT_NODE_HEIGHT: f64 = 128.0;
+const GROUP_PADDING_X: f64 = 32.0;
+const GROUP_PADDING_TOP: f64 = 48.0;
+const GROUP_PADDING_BOTTOM: f64 = 32.0;
+const MIN_GROUP_WIDTH: f64 = 160.0;
+const MIN_GROUP_HEIGHT: f64 = 120.0;
 
 #[derive(Debug, Error)]
 pub enum WorkflowEditError {
@@ -12,6 +21,10 @@ pub enum WorkflowEditError {
     DuplicateEdgeId(String),
     #[error("group `{0}` was not found")]
     GroupNotFound(String),
+    #[error("no nodes selected for {0}")]
+    EmptySelection(String),
+    #[error("node `{0}` is in a locked group")]
+    NodeInLockedGroup(String),
     #[error("cannot connect node `{0}` to itself")]
     SelfConnection(String),
     #[error("edge from `{source_id}` to `{target_id}` already exists")]
@@ -106,6 +119,15 @@ pub fn selected_node_id(workflow: &WorkflowFile) -> Option<&str> {
         .map(|node| node.id.as_str())
 }
 
+pub fn selected_node_ids(workflow: &WorkflowFile) -> Vec<&str> {
+    workflow
+        .nodes
+        .iter()
+        .filter(|node| node.selected.unwrap_or(false))
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
 pub fn select_node(workflow: &mut WorkflowFile, node_id: Option<&str>) -> EditResult<()> {
     if let Some(node_id) = node_id {
         ensure_node_exists(workflow, node_id)?;
@@ -115,6 +137,29 @@ pub fn select_node(workflow: &mut WorkflowFile, node_id: Option<&str>) -> EditRe
         node.selected = (Some(node.id.as_str()) == node_id).then_some(true);
     }
     Ok(())
+}
+
+pub fn select_nodes(workflow: &mut WorkflowFile, node_ids: &[String]) -> EditResult<()> {
+    for node_id in node_ids {
+        ensure_node_exists(workflow, node_id)?;
+    }
+
+    let selected: HashSet<&str> = node_ids.iter().map(String::as_str).collect();
+    for node in &mut workflow.nodes {
+        node.selected = selected.contains(node.id.as_str()).then_some(true);
+    }
+    Ok(())
+}
+
+pub fn toggle_node_selection(workflow: &mut WorkflowFile, node_id: &str) -> EditResult<bool> {
+    let node = workflow
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| WorkflowEditError::NodeNotFound(node_id.to_string()))?;
+    let selected = !node.selected.unwrap_or(false);
+    node.selected = selected.then_some(true);
+    Ok(selected)
 }
 
 pub fn move_node_by(
@@ -168,6 +213,64 @@ pub fn toggle_group_lock(workflow: &mut WorkflowFile, group_id: &str) -> EditRes
     let next = !group.locked.unwrap_or(false);
     group.locked = next.then_some(true);
     Ok(next)
+}
+
+pub fn create_group_for_nodes(
+    workflow: &mut WorkflowFile,
+    node_ids: &[String],
+) -> EditResult<NodeGroup> {
+    let mut unique_node_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for node_id in node_ids {
+        ensure_node_exists(workflow, node_id)?;
+        if is_node_in_locked_group(workflow, node_id) {
+            return Err(WorkflowEditError::NodeInLockedGroup(node_id.clone()));
+        }
+        if seen.insert(node_id.as_str()) {
+            unique_node_ids.push(node_id.clone());
+        }
+    }
+    if unique_node_ids.is_empty() {
+        return Err(WorkflowEditError::EmptySelection(
+            "group creation".to_string(),
+        ));
+    }
+
+    let group_id = next_group_id(workflow);
+    let group = NodeGroup {
+        id: group_id.clone(),
+        name: next_group_name(workflow),
+        color: GroupColor::Purple,
+        position: group_position_for_nodes(workflow, &unique_node_ids)?,
+        size: group_size_for_nodes(workflow, &unique_node_ids)?,
+        locked: None,
+        is_nbp_input: None,
+        extra: IndexMap::new(),
+    };
+
+    let selected: HashSet<&str> = unique_node_ids.iter().map(String::as_str).collect();
+    for node in &mut workflow.nodes {
+        if selected.contains(node.id.as_str()) {
+            node.group_id = Some(group_id.clone());
+        }
+    }
+    workflow.groups.insert(group_id, group.clone());
+    Ok(group)
+}
+
+pub fn resize_group_by(
+    workflow: &mut WorkflowFile,
+    group_id: &str,
+    width_delta: f64,
+    height_delta: f64,
+) -> EditResult<Size> {
+    let group = workflow
+        .groups
+        .get_mut(group_id)
+        .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?;
+    group.size.width = (group.size.width + width_delta).max(MIN_GROUP_WIDTH);
+    group.size.height = (group.size.height + height_delta).max(MIN_GROUP_HEIGHT);
+    Ok(group.size)
 }
 
 pub fn add_edge_between(
@@ -282,6 +385,77 @@ fn next_edge_id(workflow: &WorkflowFile, source: &str, target: &str) -> String {
     unreachable!("unbounded suffix search always returns")
 }
 
+fn next_group_id(workflow: &WorkflowFile) -> String {
+    for suffix in 1.. {
+        let candidate = format!("group_{suffix}");
+        if !workflow.groups.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+fn next_group_name(workflow: &WorkflowFile) -> String {
+    let names = workflow
+        .groups
+        .values()
+        .map(|group| group.name.as_str())
+        .collect::<HashSet<_>>();
+    for suffix in 1.. {
+        let candidate = format!("Group {suffix}");
+        if !names.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+fn group_position_for_nodes(workflow: &WorkflowFile, node_ids: &[String]) -> EditResult<Position> {
+    let (min_x, min_y, _, _) = group_bounds_for_nodes(workflow, node_ids)?;
+    Ok(Position {
+        x: (min_x - GROUP_PADDING_X).max(0.0),
+        y: (min_y - GROUP_PADDING_TOP).max(0.0),
+    })
+}
+
+fn group_size_for_nodes(workflow: &WorkflowFile, node_ids: &[String]) -> EditResult<Size> {
+    let (min_x, min_y, max_x, max_y) = group_bounds_for_nodes(workflow, node_ids)?;
+    Ok(Size {
+        width: (max_x - min_x + GROUP_PADDING_X * 2.0).max(MIN_GROUP_WIDTH),
+        height: (max_y - min_y + GROUP_PADDING_TOP + GROUP_PADDING_BOTTOM).max(MIN_GROUP_HEIGHT),
+    })
+}
+
+fn group_bounds_for_nodes(
+    workflow: &WorkflowFile,
+    node_ids: &[String],
+) -> EditResult<(f64, f64, f64, f64)> {
+    let selected = node_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut bounds = None::<(f64, f64, f64, f64)>;
+
+    for node in workflow
+        .nodes
+        .iter()
+        .filter(|node| selected.contains(node.id.as_str()))
+    {
+        let min_x = node.position.x;
+        let min_y = node.position.y;
+        let max_x = node.position.x + node.width.unwrap_or(DEFAULT_NODE_WIDTH);
+        let max_y = node.position.y + node.height.unwrap_or(DEFAULT_NODE_HEIGHT);
+        bounds = Some(match bounds {
+            Some((old_min_x, old_min_y, old_max_x, old_max_y)) => (
+                old_min_x.min(min_x),
+                old_min_y.min(min_y),
+                old_max_x.max(max_x),
+                old_max_y.max(max_y),
+            ),
+            None => (min_x, min_y, max_x, max_y),
+        });
+    }
+
+    bounds.ok_or_else(|| WorkflowEditError::EmptySelection("group bounds".to_string()))
+}
+
 fn sanitize_id_part(value: &str) -> String {
     value
         .chars()
@@ -362,6 +536,31 @@ mod tests {
         select_node(&mut workflow, Some("b")).unwrap();
 
         assert_eq!(selected_node_id(&workflow), Some("b"));
+        assert_eq!(workflow.nodes[0].selected, None);
+        assert_eq!(workflow.nodes[1].selected, Some(true));
+    }
+
+    #[test]
+    fn selecting_multiple_nodes_preserves_ordered_selection() {
+        let mut workflow = two_node_workflow();
+        select_nodes(&mut workflow, &["b".to_string(), "a".to_string()]).unwrap();
+
+        assert_eq!(selected_node_id(&workflow), Some("a"));
+        assert_eq!(selected_node_ids(&workflow), vec!["a", "b"]);
+        assert_eq!(workflow.nodes[0].selected, Some(true));
+        assert_eq!(workflow.nodes[1].selected, Some(true));
+    }
+
+    #[test]
+    fn toggling_node_selection_flips_only_target_node() {
+        let mut workflow = two_node_workflow();
+        select_node(&mut workflow, Some("a")).unwrap();
+
+        assert!(toggle_node_selection(&mut workflow, "b").unwrap());
+        assert_eq!(selected_node_ids(&workflow), vec!["a", "b"]);
+
+        assert!(!toggle_node_selection(&mut workflow, "a").unwrap());
+        assert_eq!(selected_node_ids(&workflow), vec!["b"]);
         assert_eq!(workflow.nodes[0].selected, None);
         assert_eq!(workflow.nodes[1].selected, Some(true));
     }
@@ -513,5 +712,64 @@ mod tests {
         assert!(!is_node_in_locked_group(&workflow, "b"));
         assert!(!toggle_group_lock(&mut workflow, "group-1").unwrap());
         assert!(!is_node_in_locked_group(&workflow, "a"));
+    }
+
+    #[test]
+    fn creating_group_for_nodes_assigns_bounds_and_membership() {
+        let mut workflow = two_node_workflow();
+        let group = create_group_for_nodes(
+            &mut workflow,
+            &["a".to_string(), "b".to_string(), "a".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(group.id, "group_1");
+        assert_eq!(group.name, "Group 1");
+        assert_eq!(group.position, Position { x: 0.0, y: 0.0 });
+        assert!(group.size.width >= 338.0);
+        assert!(group.size.height >= 360.0);
+        assert_eq!(workflow.groups.len(), 1);
+        assert_eq!(workflow.nodes[0].group_id.as_deref(), Some("group_1"));
+        assert_eq!(workflow.nodes[1].group_id.as_deref(), Some("group_1"));
+    }
+
+    #[test]
+    fn group_creation_rejects_locked_group_member() {
+        let mut workflow = two_node_workflow();
+        workflow.nodes[0].group_id = Some("locked".to_string());
+        workflow.groups = IndexMap::from([(
+            "locked".to_string(),
+            NodeGroup {
+                id: "locked".to_string(),
+                name: "Locked".to_string(),
+                color: GroupColor::Blue,
+                position: Position { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: 200.0,
+                    height: 160.0,
+                },
+                locked: Some(true),
+                is_nbp_input: None,
+                extra: IndexMap::new(),
+            },
+        )]);
+
+        let err = create_group_for_nodes(&mut workflow, &["a".to_string()]).unwrap_err();
+        assert!(matches!(err, WorkflowEditError::NodeInLockedGroup(id) if id == "a"));
+    }
+
+    #[test]
+    fn resizing_group_clamps_to_minimum_size() {
+        let mut workflow = two_node_workflow();
+        create_group_for_nodes(&mut workflow, &["a".to_string()]).unwrap();
+
+        let size = resize_group_by(&mut workflow, "group_1", -1000.0, -1000.0).unwrap();
+        assert_eq!(
+            size,
+            Size {
+                width: MIN_GROUP_WIDTH,
+                height: MIN_GROUP_HEIGHT
+            }
+        );
     }
 }
