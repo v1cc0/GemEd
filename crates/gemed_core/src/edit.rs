@@ -45,6 +45,12 @@ pub enum WorkflowEditError {
 
 pub type EditResult<T> = std::result::Result<T, WorkflowEditError>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroupMove {
+    pub position: Position,
+    pub moved_node_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowUndoStack {
     undo: Vec<WorkflowFile>,
@@ -292,6 +298,51 @@ pub fn set_group_size(workflow: &mut WorkflowFile, group_id: &str, size: Size) -
     group.size.width = size.width.max(MIN_GROUP_WIDTH);
     group.size.height = size.height.max(MIN_GROUP_HEIGHT);
     Ok(group.size)
+}
+
+pub fn move_group_by(
+    workflow: &mut WorkflowFile,
+    group_id: &str,
+    dx: f64,
+    dy: f64,
+) -> EditResult<GroupMove> {
+    let current_position = {
+        let group = workflow
+            .groups
+            .get(group_id)
+            .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?;
+        if group.locked.unwrap_or(false) {
+            return Err(WorkflowEditError::GroupLocked(group_id.to_string()));
+        }
+        group.position
+    };
+
+    let next_position = Position {
+        x: (current_position.x + dx).max(0.0),
+        y: (current_position.y + dy).max(0.0),
+    };
+    let actual_dx = next_position.x - current_position.x;
+    let actual_dy = next_position.y - current_position.y;
+
+    let mut moved_node_count = 0;
+    for node in &mut workflow.nodes {
+        if node.group_id.as_deref() == Some(group_id) {
+            node.position.x = (node.position.x + actual_dx).max(0.0);
+            node.position.y = (node.position.y + actual_dy).max(0.0);
+            moved_node_count += 1;
+        }
+    }
+
+    let group = workflow
+        .groups
+        .get_mut(group_id)
+        .ok_or_else(|| WorkflowEditError::GroupNotFound(group_id.to_string()))?;
+    group.position = next_position;
+
+    Ok(GroupMove {
+        position: next_position,
+        moved_node_count,
+    })
 }
 
 pub fn add_edge_between(
@@ -826,6 +877,33 @@ mod tests {
             },
         )
         .unwrap_err();
+        assert!(matches!(err, WorkflowEditError::GroupLocked(group_id) if group_id == "group_1"));
+    }
+
+    #[test]
+    fn moving_group_moves_member_nodes_and_clamps_group_origin() {
+        let mut workflow = two_node_workflow();
+        create_group_for_nodes(&mut workflow, &["a".to_string(), "b".to_string()]).unwrap();
+
+        let moved = move_group_by(&mut workflow, "group_1", 24.0, 16.0).unwrap();
+        assert_eq!(moved.position, Position { x: 24.0, y: 16.0 });
+        assert_eq!(moved.moved_node_count, 2);
+        assert_eq!(workflow.nodes[0].position, Position { x: 34.0, y: 36.0 });
+        assert_eq!(workflow.nodes[1].position, Position { x: 124.0, y: 216.0 });
+
+        let moved = move_group_by(&mut workflow, "group_1", -100.0, -100.0).unwrap();
+        assert_eq!(moved.position, Position { x: 0.0, y: 0.0 });
+        assert_eq!(workflow.nodes[0].position, Position { x: 10.0, y: 20.0 });
+        assert_eq!(workflow.nodes[1].position, Position { x: 100.0, y: 200.0 });
+    }
+
+    #[test]
+    fn moving_locked_group_is_rejected() {
+        let mut workflow = two_node_workflow();
+        create_group_for_nodes(&mut workflow, &["a".to_string()]).unwrap();
+        toggle_group_lock(&mut workflow, "group_1").unwrap();
+
+        let err = move_group_by(&mut workflow, "group_1", 10.0, 10.0).unwrap_err();
         assert!(matches!(err, WorkflowEditError::GroupLocked(group_id) if group_id == "group_1"));
     }
 }

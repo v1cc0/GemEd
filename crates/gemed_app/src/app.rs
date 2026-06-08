@@ -6,9 +6,9 @@ use dioxus::prelude::*;
 use gemed_core::{
     GroupColor, NodeGroup, NodeStatus, Position, Size, WorkflowEdge, WorkflowFile, WorkflowNode,
     WorkflowUndoStack, add_edge_between, create_group_for_nodes, is_node_in_locked_group,
-    move_node_by, remove_edge, resize_group_by, select_node, selected_node_id, selected_node_ids,
-    set_group_size, set_node_position, source_handle_options, target_handle_options,
-    toggle_group_lock, toggle_node_selection,
+    move_group_by, move_node_by, remove_edge, resize_group_by, select_node, selected_node_id,
+    selected_node_ids, set_group_size, set_node_position, source_handle_options,
+    target_handle_options, toggle_group_lock, toggle_node_selection,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -67,6 +67,9 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .group-box.locked { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2px rgba(250, 204, 21, .14); }
 .group-box.nbp { border-style: dashed; }
 .group-header { position: absolute; left: .65rem; top: -.95rem; display: inline-flex; align-items: center; gap: .35rem; padding: .22rem .5rem; border-radius: .55rem; color: white; font-size: .72rem; font-weight: 750; pointer-events: auto; box-shadow: 0 10px 24px rgba(0, 0, 0, .28); }
+.group-header.movable { cursor: grab; }
+.group-header.moving { cursor: grabbing; filter: brightness(1.1); }
+.group-box.locked .group-header { cursor: not-allowed; }
 .group-lock-toggle { border: 1px solid rgba(255,255,255,.18); border-radius: .45rem; padding: .08rem .35rem; background: rgba(15, 23, 42, .36); color: white; cursor: pointer; font-size: .68rem; }
 .group-lock-toggle:hover { background: rgba(15, 23, 42, .62); }
 .group-resize-handle { position: absolute; right: -.45rem; bottom: -.45rem; width: 1rem; height: 1rem; border-radius: .35rem; border: 2px solid rgba(224, 242, 254, .9); background: rgba(14, 165, 233, .8); box-shadow: 0 8px 18px rgba(0, 0, 0, .32); cursor: nwse-resize; pointer-events: auto; }
@@ -151,6 +154,7 @@ pub fn App() -> Element {
     let drag_state = use_signal(|| None::<DragState>);
     let pan_state = use_signal(|| None::<PanState>);
     let group_resize_state = use_signal(|| None::<GroupResizeState>);
+    let group_move_state = use_signal(|| None::<GroupMoveState>);
     let group_selection_state = use_signal(|| None::<GroupSelectionState>);
     let viewport = use_signal(CanvasViewport::default);
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
@@ -161,7 +165,7 @@ pub fn App() -> Element {
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_selection_state, viewport, connection_draft }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft }
             }
         }
     }
@@ -916,6 +920,7 @@ fn WorkflowCanvas(
     drag_state: Signal<Option<DragState>>,
     pan_state: Signal<Option<PanState>>,
     group_resize_state: Signal<Option<GroupResizeState>>,
+    group_move_state: Signal<Option<GroupMoveState>>,
     group_selection_state: Signal<Option<GroupSelectionState>>,
     viewport: Signal<CanvasViewport>,
     connection_draft: Signal<Option<ConnectionDraft>>,
@@ -923,6 +928,7 @@ fn WorkflowCanvas(
     let wf = workflow.read();
     let viewport_snapshot = *viewport.read();
     let is_panning = pan_state.read().is_some();
+    let is_moving_group = group_move_state.read().is_some();
     let active_selection_rect = group_selection_state
         .read()
         .as_ref()
@@ -934,6 +940,9 @@ fn WorkflowCanvas(
     };
     let mut canvas_classes = vec!["canvas"];
     if is_panning {
+        canvas_classes.push("panning");
+    }
+    if is_moving_group {
         canvas_classes.push("panning");
     }
     if active_selection_rect.is_some() {
@@ -954,23 +963,28 @@ fn WorkflowCanvas(
             onmousedown: move |event: MouseEvent| {
                 begin_canvas_pan(
                     event,
-                    pan_state,
-                    viewport,
-                    drag_state,
-                    connection_draft,
-                    group_resize_state,
-                    group_selection_state,
+                    CanvasGestureSignals {
+                        drag_state,
+                        pan_state,
+                        connection_draft,
+                        group_resize_state,
+                        group_move_state,
+                        group_selection_state,
+                        viewport,
+                    },
                 );
             },
             onmousemove: move |event: MouseEvent| {
                 update_dragged_node(event.clone(), workflow, json_text, drag_state);
                 update_group_resize(event.clone(), workflow, json_text, group_resize_state);
+                update_group_move(event.clone(), workflow, json_text, group_move_state);
                 update_group_selection(event.clone(), group_selection_state);
                 update_canvas_pan(event, viewport, pan_state);
             },
             onmouseup: move |_| {
                 finish_drag(workflow, json_text, message, drag_state);
                 finish_group_resize(workflow, message, undo_stack, group_resize_state);
+                finish_group_move(workflow, message, undo_stack, group_move_state);
                 finish_group_selection(workflow, json_text, message, undo_stack, group_selection_state);
                 finish_canvas_pan(pan_state);
                 cancel_canvas_connection(message, connection_draft);
@@ -978,6 +992,7 @@ fn WorkflowCanvas(
             onmouseleave: move |_| {
                 finish_drag(workflow, json_text, message, drag_state);
                 finish_group_resize(workflow, message, undo_stack, group_resize_state);
+                finish_group_move(workflow, message, undo_stack, group_move_state);
                 cancel_group_selection(message, group_selection_state);
                 finish_canvas_pan(pan_state);
             },
@@ -995,16 +1010,19 @@ fn WorkflowCanvas(
                     onmousedown: move |event: MouseEvent| {
                         begin_group_selection(
                             event,
-                            group_selection_state,
-                            viewport,
-                            drag_state,
-                            pan_state,
-                            connection_draft,
-                            group_resize_state,
+                            CanvasGestureSignals {
+                                drag_state,
+                                pan_state,
+                                connection_draft,
+                                group_resize_state,
+                                group_move_state,
+                                group_selection_state,
+                                viewport,
+                            },
                         );
                     },
                     for group in wf.groups.values() {
-                        GroupBox { group: group.clone(), workflow, json_text, message, undo_stack, group_resize_state, viewport }
+                        GroupBox { group: group.clone(), workflow, json_text, message, undo_stack, group_resize_state, group_move_state, viewport }
                     }
                     if let Some(rect) = active_selection_rect {
                         div {
@@ -1114,6 +1132,7 @@ fn GroupBox(
     mut message: Signal<Message>,
     mut undo_stack: Signal<WorkflowUndoStack>,
     mut group_resize_state: Signal<Option<GroupResizeState>>,
+    mut group_move_state: Signal<Option<GroupMoveState>>,
     viewport: Signal<CanvasViewport>,
 ) -> Element {
     let color = group_color_style(group.color);
@@ -1137,10 +1156,22 @@ fn GroupBox(
     {
         class.push("resizing");
     }
+    let is_moving = group_move_state
+        .read()
+        .as_ref()
+        .is_some_and(|state| state.group_id == group.id);
     if group.is_nbp_input.unwrap_or(false) {
         class.push("nbp");
     }
     let class = class.join(" ");
+    let group_locked = group.locked.unwrap_or(false);
+    let header_class = if group_locked {
+        "group-header"
+    } else if is_moving {
+        "group-header movable moving"
+    } else {
+        "group-header movable"
+    };
     let header_style = format!("background: {color};");
     let lock_label = if group.locked.unwrap_or(false) {
         "Unlock"
@@ -1149,19 +1180,37 @@ fn GroupBox(
     };
     let group_id = group.id.clone();
     let resize_group_id = group.id.clone();
-    let group_locked = group.locked.unwrap_or(false);
+    let move_group_id = group.id.clone();
     let start_size = group.size;
 
     rsx! {
         div { class: "{class}", style: "{style}",
             div {
-                class: "group-header",
+                class: "{header_class}",
                 style: "{header_style}",
+                title: if group_locked { "Unlock group before moving" } else { "Drag to move group and its member nodes" },
                 onmousedown: move |event: MouseEvent| {
                     event.stop_propagation();
+                    event.prevent_default();
+                    if group_locked {
+                        message.set(Message::err(format!(
+                            "Group `{move_group_id}` is locked. Unlock it before moving."
+                        )));
+                        return;
+                    }
+                    let point = event.data().client_coordinates();
+                    let before = workflow.read().clone();
+                    group_move_state.set(Some(GroupMoveState {
+                        group_id: move_group_id.clone(),
+                        start_client_x: point.x,
+                        start_client_y: point.y,
+                        start_viewport: *viewport.read(),
+                        before,
+                    }));
                 },
                 onmouseup: move |event: MouseEvent| {
                     event.stop_propagation();
+                    finish_group_move(workflow, message, undo_stack, group_move_state);
                 },
                 span { "{group.name}" }
                 if group.locked.unwrap_or(false) {
@@ -1906,20 +1955,70 @@ fn finish_group_resize(
     }
 }
 
-fn begin_group_selection(
+fn update_group_move(
     event: MouseEvent,
-    mut group_selection_state: Signal<Option<GroupSelectionState>>,
-    viewport: Signal<CanvasViewport>,
-    drag_state: Signal<Option<DragState>>,
-    pan_state: Signal<Option<PanState>>,
-    connection_draft: Signal<Option<ConnectionDraft>>,
-    group_resize_state: Signal<Option<GroupResizeState>>,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    group_move_state: Signal<Option<GroupMoveState>>,
 ) {
+    let Some(group_move) = group_move_state.read().clone() else {
+        return;
+    };
+
+    event.prevent_default();
+    let point = event.data().client_coordinates();
+    let dx = (point.x - group_move.start_client_x) / group_move.start_viewport.zoom;
+    let dy = (point.y - group_move.start_client_y) / group_move.start_viewport.zoom;
+    let mut next = group_move.before.clone();
+    if move_group_by(&mut next, &group_move.group_id, dx, dy).is_err() {
+        return;
+    }
+    if let Ok(json) = next.to_pretty_json() {
+        workflow.set(next);
+        json_text.set(json);
+    }
+}
+
+fn finish_group_move(
+    workflow: Signal<WorkflowFile>,
+    mut message: Signal<Message>,
+    mut undo_stack: Signal<WorkflowUndoStack>,
+    mut group_move_state: Signal<Option<GroupMoveState>>,
+) {
+    let Some(group_move) = group_move_state.read().clone() else {
+        return;
+    };
+    group_move_state.set(None);
+    let current = workflow.read().clone();
+    if current != group_move.before {
+        undo_stack.write().record(&group_move.before);
+    }
+    if let Some(group) = current.groups.get(&group_move.group_id) {
+        let moved_node_count = current
+            .nodes
+            .iter()
+            .filter(|node| node.group_id.as_deref() == Some(group_move.group_id.as_str()))
+            .count();
+        message.set(Message::ok(format!(
+            "Moved group `{}` to ({:.0}, {:.0}) with {} member node(s).",
+            group.id, group.position.x, group.position.y, moved_node_count
+        )));
+    } else {
+        message.set(Message::err(format!(
+            "Moved group `{}` disappeared.",
+            group_move.group_id
+        )));
+    }
+}
+
+fn begin_group_selection(event: MouseEvent, signals: CanvasGestureSignals) {
+    let mut group_selection_state = signals.group_selection_state;
     let modifiers = event.data().modifiers();
-    if drag_state.read().is_some()
-        || pan_state.read().is_some()
-        || connection_draft.read().is_some()
-        || group_resize_state.read().is_some()
+    if signals.drag_state.read().is_some()
+        || signals.pan_state.read().is_some()
+        || signals.connection_draft.read().is_some()
+        || signals.group_resize_state.read().is_some()
+        || signals.group_move_state.read().is_some()
         || group_selection_state.read().is_some()
         || !modifiers.shift()
         || !matches!(event.data().trigger_button(), Some(MouseButton::Primary))
@@ -1936,7 +2035,7 @@ fn begin_group_selection(
         current: point,
         start_client_x: client.x,
         start_client_y: client.y,
-        start_viewport: *viewport.read(),
+        start_viewport: *signals.viewport.read(),
     }));
 }
 
@@ -2015,20 +2114,14 @@ fn cancel_group_selection(
     message.set(Message::ok("Cancelled group box selection."));
 }
 
-fn begin_canvas_pan(
-    event: MouseEvent,
-    mut pan_state: Signal<Option<PanState>>,
-    viewport: Signal<CanvasViewport>,
-    drag_state: Signal<Option<DragState>>,
-    connection_draft: Signal<Option<ConnectionDraft>>,
-    group_resize_state: Signal<Option<GroupResizeState>>,
-    group_selection_state: Signal<Option<GroupSelectionState>>,
-) {
-    if drag_state.read().is_some()
+fn begin_canvas_pan(event: MouseEvent, signals: CanvasGestureSignals) {
+    let mut pan_state = signals.pan_state;
+    if signals.drag_state.read().is_some()
         || pan_state.read().is_some()
-        || connection_draft.read().is_some()
-        || group_resize_state.read().is_some()
-        || group_selection_state.read().is_some()
+        || signals.connection_draft.read().is_some()
+        || signals.group_resize_state.read().is_some()
+        || signals.group_move_state.read().is_some()
+        || signals.group_selection_state.read().is_some()
         || event.data().modifiers().shift()
         || !matches!(
             event.data().trigger_button(),
@@ -2043,7 +2136,7 @@ fn begin_canvas_pan(
     pan_state.set(Some(PanState {
         start_client_x: point.x,
         start_client_y: point.y,
-        start_viewport: *viewport.read(),
+        start_viewport: *signals.viewport.read(),
     }));
 }
 
@@ -2365,12 +2458,32 @@ struct GroupEditSignals {
     undo_stack: Signal<WorkflowUndoStack>,
 }
 
+#[derive(Clone, Copy)]
+struct CanvasGestureSignals {
+    drag_state: Signal<Option<DragState>>,
+    pan_state: Signal<Option<PanState>>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
+    group_resize_state: Signal<Option<GroupResizeState>>,
+    group_move_state: Signal<Option<GroupMoveState>>,
+    group_selection_state: Signal<Option<GroupSelectionState>>,
+    viewport: Signal<CanvasViewport>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct GroupResizeState {
     group_id: String,
     start_client_x: f64,
     start_client_y: f64,
     start_size: Size,
+    start_viewport: CanvasViewport,
+    before: WorkflowFile,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GroupMoveState {
+    group_id: String,
+    start_client_x: f64,
+    start_client_y: f64,
     start_viewport: CanvasViewport,
     before: WorkflowFile,
 }

@@ -16,7 +16,7 @@ Implemented now:
 - Built-in sample workflow
 - JSON editor that loads and validates workflow JSON
 - SVG/HTML canvas rendering nodes and edges
-- Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
+- Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, drag-to-move group headers, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
@@ -27,7 +27,7 @@ Implemented now:
 
 Not implemented yet:
 
-- Full editable canvas UX: group move handles and polished drag/handle affordances
+- Full editable canvas UX: polished drag/handle affordances
 - Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
 - Explicit multi-file project picker flows and external media storage
