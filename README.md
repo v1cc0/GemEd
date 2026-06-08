@@ -1,19 +1,20 @@
 # GemEd
 
-GemEd is being rewritten as a Rust + Dioxus visual workflow editor. The current runnable slice is a cross-platform Dioxus shell with a Rust workflow schema, validation, JSON import/export, and a read-only node/edge canvas.
+GemEd is being rewritten as a Rust + Dioxus visual workflow editor. The current runnable slice is a cross-platform Dioxus shell with a Rust workflow schema, validation, JSON import/export, storage, mock provider execution, and a basic editable node/edge canvas.
 
 ## Current Status
 
 Implemented now:
 
-- Rust workspace with `gemed_core`, `gemed_executor`, `gemed_providers`, and `gemed_app` crates
+- Rust workspace with `gemed_core`, `gemed_executor`, `gemed_providers`, `gemed_storage`, and `gemed_app` crates
 - Dioxus app targeting web and desktop from one codebase
 - Workflow v1 schema for nodes, edges, groups, node statuses, and edge style
 - Graph traversal, connected-input resolution, and topological execution ordering
 - Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, and control nodes
 - Built-in sample workflow
 - JSON editor that loads and validates workflow JSON
-- Read-only SVG/HTML canvas rendering nodes and edges
+- SVG/HTML canvas rendering nodes and edges
+- Basic Canvas MVP controls: select node, nudge selected node, connect selected node to the next node, and remove edges
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
@@ -23,7 +24,7 @@ Implemented now:
 
 Not implemented yet:
 
-- Editable drag/connect canvas
+- Full editable canvas UX: pointer drag, pan/zoom, multi-select, handle-level connect/disconnect, undo/redo
 - Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
 - Native file dialogs, explicit project picker/save-as flows, and external media storage

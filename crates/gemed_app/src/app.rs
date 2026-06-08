@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
-use gemed_core::{NodeStatus, WorkflowFile, WorkflowNode};
+use gemed_core::{
+    NodeStatus, WorkflowFile, WorkflowNode, add_edge_between, move_node_by, remove_edge,
+    select_node, selected_node_id,
+};
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
@@ -50,6 +53,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .node.processing { border-color: rgba(251, 191, 36, .38); }
 .node.control { border-color: rgba(96, 165, 250, .45); }
 .node.output { border-color: rgba(244, 114, 182, .45); }
+.node.selected { outline: 3px solid rgba(96, 165, 250, .72); box-shadow: 0 0 0 6px rgba(37, 99, 235, .18), 0 22px 60px rgba(0, 0, 0, .34); }
 .node-head { padding: .75rem .85rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-bottom: 1px solid rgba(148, 163, 184, .12); }
 .node-title { font-weight: 700; font-size: .95rem; line-height: 1.2; }
 .badge { white-space: nowrap; border-radius: 999px; padding: .18rem .5rem; font-size: .7rem; border: 1px solid rgba(148, 163, 184, .24); color: #b6c5e2; background: rgba(15, 23, 42, .8); }
@@ -66,6 +70,12 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .event-head { display: flex; justify-content: space-between; gap: .6rem; align-items: center; margin-bottom: .25rem; }
 .event-title { color: #dbeafe; font-weight: 650; font-size: .82rem; }
 .event-message { color: #9fb0cf; font-size: .76rem; line-height: 1.35; }
+.edit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; }
+.edit-grid .action { padding: .48rem .4rem; }
+.edge-list { display: flex; flex-direction: column; gap: .4rem; max-height: 9rem; overflow: auto; }
+.edge-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-radius: .7rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); padding: .45rem .55rem; }
+.edge-row code { color: #dbeafe; font-size: .72rem; overflow-wrap: anywhere; }
+.mini-action { border: 1px solid rgba(248, 113, 113, .28); color: #fecaca; background: rgba(127, 29, 29, .28); border-radius: .55rem; padding: .24rem .45rem; cursor: pointer; font-size: .72rem; }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
 "#;
@@ -88,7 +98,7 @@ pub fn App() -> Element {
             Header { workflow, json_text, message, execution_report }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report }
-                WorkflowCanvas { workflow }
+                WorkflowCanvas { workflow, json_text, message }
             }
         }
     }
@@ -265,13 +275,32 @@ fn Header(
 
 #[component]
 fn Sidebar(
-    workflow: Signal<WorkflowFile>,
+    mut workflow: Signal<WorkflowFile>,
     mut json_text: Signal<String>,
-    message: Signal<Message>,
+    mut message: Signal<Message>,
     execution_report: Signal<Option<SimpleExecutionReport>>,
 ) -> Element {
     let wf = workflow.read();
     let counts = wf.node_type_counts();
+    let selected_id = selected_node_id(&wf).map(ToOwned::to_owned);
+    let selected_index = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().position(|node| node.id == *id));
+    let next_node_id = selected_index.and_then(|index| {
+        (!wf.nodes.is_empty()).then(|| wf.nodes[(index + 1) % wf.nodes.len()].id.clone())
+    });
+    let selected_summary = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .map(|node| {
+            format!(
+                "{} at ({:.0}, {:.0})",
+                node.display_label(),
+                node.position.x,
+                node.position.y
+            )
+        })
+        .unwrap_or_else(|| "No node selected. Click a card in the canvas.".to_string());
     let msg = message.read();
     let order_text = match execution_order(&wf) {
         Ok(items) if items.is_empty() => "Order: no nodes".to_string(),
@@ -301,6 +330,110 @@ fn Sidebar(
                             div { class: "type-row",
                                 code { "{node_type.title()}" }
                                 span { "× {count}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section { class: "panel",
+                h2 { "Canvas MVP" }
+                p { "{selected_summary}" }
+                div { class: "edit-grid",
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, |workflow| {
+                                if workflow.nodes.is_empty() {
+                                    return Err("No nodes to select.".to_string());
+                                }
+                                let next_id = selected_node_id(workflow)
+                                    .and_then(|id| workflow.nodes.iter().position(|node| node.id == id))
+                                    .map(|index| workflow.nodes[(index + 1) % workflow.nodes.len()].id.clone())
+                                    .unwrap_or_else(|| workflow.nodes[0].id.clone());
+                                select_node(workflow, Some(&next_id))
+                                    .map_err(|err| err.to_string())?;
+                                Ok(format!("Selected `{next_id}`."))
+                            });
+                        },
+                        "Select Next"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_id.is_none(),
+                        onclick: move |_| {
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, -32.0, 0.0);
+                        },
+                        "←"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_id.is_none(),
+                        onclick: move |_| {
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 32.0, 0.0);
+                        },
+                        "→"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_id.is_none(),
+                        onclick: move |_| {
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 0.0, -32.0);
+                        },
+                        "↑"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_id.is_none(),
+                        onclick: move |_| {
+                            mutate_selected_node(&mut workflow, &mut json_text, &mut message, 0.0, 32.0);
+                        },
+                        "↓"
+                    }
+                    button {
+                        class: "action",
+                        disabled: selected_id.is_none() || next_node_id.is_none(),
+                        onclick: move |_| {
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, |workflow| {
+                                let Some(source) = selected_node_id(workflow).map(ToOwned::to_owned) else {
+                                    return Err("Select a source node first.".to_string());
+                                };
+                                let Some(index) = workflow.nodes.iter().position(|node| node.id == source) else {
+                                    return Err(format!("Selected node `{source}` disappeared."));
+                                };
+                                let target = workflow.nodes[(index + 1) % workflow.nodes.len()].id.clone();
+                                let edge = add_edge_between(workflow, &source, &target, None, None)
+                                    .map_err(|err| err.to_string())?;
+                                Ok(format!("Connected `{}` → `{}` as `{}`.", edge.source, edge.target, edge.id))
+                            });
+                        },
+                        "Connect Next"
+                    }
+                }
+                if wf.edges.is_empty() {
+                    p { "No edges yet." }
+                } else {
+                    div { class: "edge-list",
+                        for edge in wf.edges.iter() {
+                            {
+                                let edge_id = edge.id.clone();
+                                rsx! {
+                                    div { class: "edge-row",
+                                        code { "{edge.source} → {edge.target}" }
+                                        button {
+                                            class: "mini-action",
+                                            onclick: move |_| {
+                                                let edge_id = edge_id.clone();
+                                                mutate_workflow(&mut workflow, &mut json_text, &mut message, move |workflow| {
+                                                    remove_edge(workflow, &edge_id)
+                                                        .map(|edge| format!("Removed edge `{}` ({} → {}).", edge.id, edge.source, edge.target))
+                                                        .map_err(|err| err.to_string())
+                                                });
+                                            },
+                                            "Remove"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -342,7 +475,11 @@ fn Sidebar(
 }
 
 #[component]
-fn WorkflowCanvas(workflow: Signal<WorkflowFile>) -> Element {
+fn WorkflowCanvas(
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    message: Signal<Message>,
+) -> Element {
     let wf = workflow.read();
 
     rsx! {
@@ -369,7 +506,7 @@ fn WorkflowCanvas(workflow: Signal<WorkflowFile>) -> Element {
                         }
                     }
                     for node in wf.nodes.iter() {
-                        NodeCard { node: node.clone() }
+                        NodeCard { node: node.clone(), workflow, json_text, message }
                     }
                 }
             }
@@ -378,7 +515,12 @@ fn WorkflowCanvas(workflow: Signal<WorkflowFile>) -> Element {
 }
 
 #[component]
-fn NodeCard(node: WorkflowNode) -> Element {
+fn NodeCard(
+    node: WorkflowNode,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    mut message: Signal<Message>,
+) -> Element {
     let style = format!(
         "left: {}px; top: {}px;",
         node.position.x.max(0.0),
@@ -386,12 +528,27 @@ fn NodeCard(node: WorkflowNode) -> Element {
     );
     let status = node.status();
     let status_class = format!("badge {}", status.label());
-    let node_class = format!("node {}", node.node_type.class_name());
+    let node_class = if node.selected.unwrap_or(false) {
+        format!("node {} selected", node.node_type.class_name())
+    } else {
+        format!("node {}", node.node_type.class_name())
+    };
     let label = node.display_label();
     let preview = node.preview_text();
+    let node_id = node.id.clone();
 
     rsx! {
-        article { class: "{node_class}", style: "{style}",
+        article {
+            class: "{node_class}",
+            style: "{style}",
+            onclick: move |_| {
+                let node_id = node_id.clone();
+                mutate_workflow(&mut workflow, &mut json_text, &mut message, move |workflow| {
+                    select_node(workflow, Some(&node_id))
+                        .map_err(|err| err.to_string())?;
+                    Ok(format!("Selected `{node_id}`."))
+                });
+            },
             div { class: "node-head",
                 div { class: "node-title", "{label}" }
                 span { class: "{status_class}", "{status.label()}" }
@@ -420,6 +577,49 @@ fn edge_path(workflow: &WorkflowFile, edge: &gemed_core::WorkflowEdge) -> Option
         cx1 = x1 + mid,
         cx2 = x2 - mid
     ))
+}
+
+fn mutate_selected_node(
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    dx: f64,
+    dy: f64,
+) {
+    mutate_workflow(workflow, json_text, message, |workflow| {
+        let Some(node_id) = selected_node_id(workflow).map(ToOwned::to_owned) else {
+            return Err("Select a node before moving it.".to_string());
+        };
+        let position = move_node_by(workflow, &node_id, dx, dy).map_err(|err| err.to_string())?;
+        Ok(format!(
+            "Moved `{node_id}` to ({:.0}, {:.0}).",
+            position.x, position.y
+        ))
+    });
+}
+
+fn mutate_workflow<F>(
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    mut mutation: F,
+) where
+    F: FnMut(&mut WorkflowFile) -> Result<String, String>,
+{
+    let mut next = workflow.read().clone();
+    match mutation(&mut next) {
+        Ok(success) => match next.to_pretty_json() {
+            Ok(json) => {
+                workflow.set(next);
+                json_text.set(json);
+                message.set(Message::ok(success));
+            }
+            Err(err) => message.set(Message::err(format!(
+                "Workflow edited but export failed: {err}"
+            ))),
+        },
+        Err(err) => message.set(Message::err(err)),
+    }
 }
 
 fn save_autosave_workflow(
