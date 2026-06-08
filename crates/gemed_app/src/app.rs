@@ -1,4 +1,7 @@
-use dioxus::html::{InteractionLocation, MouseEvent};
+use dioxus::html::{
+    InteractionLocation, MouseEvent, PointerInteraction, WheelEvent, geometry::WheelDelta,
+    input_data::MouseButton,
+};
 use dioxus::prelude::*;
 use gemed_core::{
     GroupColor, NodeGroup, NodeStatus, Position, WorkflowEdge, WorkflowFile, WorkflowNode,
@@ -47,7 +50,9 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .message.ok { color: #bbf7d0; background: rgba(22, 101, 52, .28); border: 1px solid rgba(74, 222, 128, .2); }
 .message.err { color: #fecaca; background: rgba(127, 29, 29, .35); border: 1px solid rgba(248, 113, 113, .22); }
 .canvas-wrap { position: relative; overflow: auto; background-image: linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px); background-size: 32px 32px; }
-.canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; }
+.canvas-wrap.panning { cursor: grabbing; }
+.canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; cursor: grab; user-select: none; }
+.canvas.panning { cursor: grabbing; }
 .group-box { position: absolute; border-radius: 1rem; pointer-events: none; z-index: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 .group-box.locked { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2px rgba(250, 204, 21, .14); }
 .group-box.nbp { border-style: dashed; }
@@ -131,6 +136,7 @@ pub fn App() -> Element {
     let execution_report = use_signal(|| None::<SimpleExecutionReport>);
     let undo_stack = use_signal(WorkflowUndoStack::default);
     let drag_state = use_signal(|| None::<DragState>);
+    let pan_state = use_signal(|| None::<PanState>);
     let viewport = use_signal(CanvasViewport::default);
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
 
@@ -140,7 +146,7 @@ pub fn App() -> Element {
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, viewport, connection_draft }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, viewport, connection_draft }
             }
         }
     }
@@ -683,18 +689,50 @@ fn WorkflowCanvas(
     message: Signal<Message>,
     undo_stack: Signal<WorkflowUndoStack>,
     drag_state: Signal<Option<DragState>>,
+    pan_state: Signal<Option<PanState>>,
     viewport: Signal<CanvasViewport>,
     connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
     let wf = workflow.read();
     let viewport_snapshot = *viewport.read();
+    let is_panning = pan_state.read().is_some();
+    let wrap_class = if is_panning {
+        "canvas-wrap panning"
+    } else {
+        "canvas-wrap"
+    };
+    let canvas_class = if is_panning {
+        "canvas panning"
+    } else {
+        "canvas"
+    };
     let canvas_style = format!(
         "transform: translate({:.1}px, {:.1}px) scale({:.3}); transform-origin: 0 0;",
         viewport_snapshot.pan_x, viewport_snapshot.pan_y, viewport_snapshot.zoom
     );
 
     rsx! {
-        section { class: "canvas-wrap",
+        section {
+            class: "{wrap_class}",
+            onwheel: move |event: WheelEvent| {
+                handle_canvas_wheel(event, viewport);
+            },
+            onmousedown: move |event: MouseEvent| {
+                begin_canvas_pan(event, pan_state, viewport, drag_state, connection_draft);
+            },
+            onmousemove: move |event: MouseEvent| {
+                update_dragged_node(event.clone(), workflow, json_text, drag_state);
+                update_canvas_pan(event, viewport, pan_state);
+            },
+            onmouseup: move |_| {
+                finish_drag(workflow, json_text, message, drag_state);
+                finish_canvas_pan(pan_state);
+                cancel_canvas_connection(message, connection_draft);
+            },
+            onmouseleave: move |_| {
+                finish_drag(workflow, json_text, message, drag_state);
+                finish_canvas_pan(pan_state);
+            },
             if wf.nodes.is_empty() {
                 div { class: "empty",
                     div {
@@ -704,15 +742,8 @@ fn WorkflowCanvas(
                 }
             } else {
                 div {
-                    class: "canvas",
+                    class: "{canvas_class}",
                     style: "{canvas_style}",
-                    onmousemove: move |event: MouseEvent| {
-                        update_dragged_node(event, workflow, json_text, drag_state);
-                    },
-                    onmouseup: move |_| {
-                        finish_drag(workflow, json_text, message, drag_state);
-                        cancel_canvas_connection(message, connection_draft);
-                    },
                     for group in wf.groups.values() {
                         GroupBox { group: group.clone(), workflow, json_text, message, undo_stack }
                     }
@@ -732,6 +763,9 @@ fn WorkflowCanvas(
                                             path {
                                                 class: "edge-hit",
                                                 d: "{path}",
+                                                onmousedown: move |event: MouseEvent| {
+                                                    event.stop_propagation();
+                                                },
                                                 onmouseup: move |event: MouseEvent| {
                                                     event.stop_propagation();
                                                 },
@@ -754,6 +788,9 @@ fn WorkflowCanvas(
                                                 g {
                                                     class: "edge-action",
                                                     transform: "translate({action.x:.1} {action.y:.1})",
+                                                    onmousedown: move |event: MouseEvent| {
+                                                        event.stop_propagation();
+                                                    },
                                                     onmouseup: move |event: MouseEvent| {
                                                         event.stop_propagation();
                                                     },
@@ -840,13 +877,24 @@ fn GroupBox(
 
     rsx! {
         div { class: "{class}", style: "{style}",
-            div { class: "group-header", style: "{header_style}",
+            div {
+                class: "group-header",
+                style: "{header_style}",
+                onmousedown: move |event: MouseEvent| {
+                    event.stop_propagation();
+                },
+                onmouseup: move |event: MouseEvent| {
+                    event.stop_propagation();
+                },
                 span { "{group.name}" }
                 if group.locked.unwrap_or(false) {
                     span { "🔒" }
                 }
                 button {
                     class: "group-lock-toggle",
+                    onmousedown: move |event: MouseEvent| {
+                        event.stop_propagation();
+                    },
                     onmouseup: move |event: MouseEvent| {
                         event.stop_propagation();
                     },
@@ -1388,6 +1436,74 @@ fn finish_drag(
     }
 }
 
+fn begin_canvas_pan(
+    event: MouseEvent,
+    mut pan_state: Signal<Option<PanState>>,
+    viewport: Signal<CanvasViewport>,
+    drag_state: Signal<Option<DragState>>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
+) {
+    if drag_state.read().is_some()
+        || pan_state.read().is_some()
+        || connection_draft.read().is_some()
+        || !matches!(
+            event.data().trigger_button(),
+            Some(MouseButton::Primary | MouseButton::Auxiliary)
+        )
+    {
+        return;
+    }
+
+    event.prevent_default();
+    let point = event.data().client_coordinates();
+    pan_state.set(Some(PanState {
+        start_client_x: point.x,
+        start_client_y: point.y,
+        start_viewport: *viewport.read(),
+    }));
+}
+
+fn update_canvas_pan(
+    event: MouseEvent,
+    mut viewport: Signal<CanvasViewport>,
+    pan_state: Signal<Option<PanState>>,
+) {
+    let Some(pan) = pan_state.read().clone() else {
+        return;
+    };
+
+    event.prevent_default();
+    let point = event.data().client_coordinates();
+    viewport.set(CanvasViewport {
+        zoom: pan.start_viewport.zoom,
+        pan_x: pan.start_viewport.pan_x + point.x - pan.start_client_x,
+        pan_y: pan.start_viewport.pan_y + point.y - pan.start_client_y,
+    });
+}
+
+fn finish_canvas_pan(mut pan_state: Signal<Option<PanState>>) {
+    pan_state.set(None);
+}
+
+fn handle_canvas_wheel(event: WheelEvent, mut viewport: Signal<CanvasViewport>) {
+    event.prevent_default();
+    let delta_y = normalized_wheel_delta_y(event.data().delta());
+    if delta_y.abs() < f64::EPSILON {
+        return;
+    }
+
+    let factor = (-delta_y * 0.0015).exp().clamp(0.5, 1.5);
+    viewport.with_mut(|viewport| viewport.zoom_by(factor));
+}
+
+fn normalized_wheel_delta_y(delta: WheelDelta) -> f64 {
+    match delta {
+        WheelDelta::Pixels(delta) => delta.y,
+        WheelDelta::Lines(delta) => delta.y * 36.0,
+        WheelDelta::Pages(delta) => delta.y * 720.0,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum HistoryDirection {
     Undo,
@@ -1533,6 +1649,13 @@ struct DragState {
     start_client_x: f64,
     start_client_y: f64,
     start_position: Position,
+    start_viewport: CanvasViewport,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PanState {
+    start_client_x: f64,
+    start_client_y: f64,
     start_viewport: CanvasViewport,
 }
 
