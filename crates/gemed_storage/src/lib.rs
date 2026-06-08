@@ -145,6 +145,7 @@ pub mod desktop {
     use directories::ProjectDirs;
     use gemed_core::WorkflowFile;
     use serde_json::Value;
+    use std::collections::HashSet;
     use std::path::{Component, Path, PathBuf};
 
     #[derive(Debug, Clone)]
@@ -287,6 +288,7 @@ pub mod desktop {
         }
 
         pub fn save(&self, workflow: &WorkflowFile) -> Result<WorkflowProjectSnapshot> {
+            let previous_media_files = self.previous_media_files();
             std::fs::create_dir_all(&self.root).map_err(|source| StorageError::Io {
                 path: self.root.clone(),
                 source,
@@ -303,6 +305,7 @@ pub mod desktop {
                 externalize_workflow_media_json(workflow, &media_dir)?;
             let mut manifest = WorkflowProjectManifest::from_workflow(workflow);
             manifest.media_files = media_files;
+            remove_stale_media_files(&self.root, &previous_media_files, &manifest.media_files)?;
             std::fs::write(self.default_workflow_path(), workflow_json.as_bytes()).map_err(
                 |source| StorageError::Io {
                     path: self.default_workflow_path(),
@@ -324,6 +327,19 @@ pub mod desktop {
                 manifest,
                 workflow: workflow.clone(),
             })
+        }
+
+        fn previous_media_files(&self) -> Vec<String> {
+            let manifest_path = self.manifest_path();
+            if !manifest_path.exists() {
+                return Vec::new();
+            }
+            let Ok(json) = std::fs::read_to_string(manifest_path) else {
+                return Vec::new();
+            };
+            serde_json::from_str::<WorkflowProjectManifest>(&json)
+                .map(|manifest| manifest.media_files)
+                .unwrap_or_default()
         }
 
         pub fn load(&self) -> Result<WorkflowProjectSnapshot> {
@@ -391,6 +407,35 @@ pub mod desktop {
             StorageError::Backend(format!("workflow project JSON formatting failed: {source}"))
         })?;
         Ok((json, media_files))
+    }
+
+    fn remove_stale_media_files(
+        root: &Path,
+        previous_media_files: &[String],
+        current_media_files: &[String],
+    ) -> Result<()> {
+        let current: HashSet<&str> = current_media_files.iter().map(String::as_str).collect();
+        for previous in previous_media_files {
+            if current.contains(previous.as_str()) || !is_project_media_file_ref(previous) {
+                continue;
+            }
+            let Ok(path) = safe_project_child(root, previous) else {
+                continue;
+            };
+            if !path.is_file() {
+                continue;
+            }
+            std::fs::remove_file(&path).map_err(|source| StorageError::Io { path, source })?;
+        }
+        Ok(())
+    }
+
+    fn is_project_media_file_ref(value: &str) -> bool {
+        let mut components = Path::new(value).components();
+        matches!(
+            components.next(),
+            Some(Component::Normal(component)) if component == PROJECT_MEDIA_DIR
+        ) && components.all(|component| matches!(component, Component::Normal(_)))
     }
 
     fn externalize_media_value(
@@ -900,6 +945,39 @@ mod tests {
         let loaded = project.load().expect("load project media");
         assert_eq!(loaded.workflow.nodes[0].data["image"], media);
         assert_eq!(loaded.workflow.nodes[0].data["nested"]["duplicate"], media);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_removes_stale_manifest_media_files_on_save() {
+        let mut workflow = WorkflowFile::blank();
+        workflow.name = "media gc".to_string();
+        workflow.nodes.push(WorkflowNode::new(
+            "image",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "image": "data:image/png;base64,aGVsbG8="
+            }),
+        ));
+        let root = unique_temp_dir("gemed-project-media-gc-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let first = project.save(&workflow).expect("first project save");
+        let stale_file = root.join(&first.manifest.media_files[0]);
+        assert!(stale_file.is_file());
+        let untracked_file = root.join(PROJECT_MEDIA_DIR).join("user-kept.bin");
+        std::fs::write(&untracked_file, b"user data").unwrap();
+
+        workflow.nodes[0].data["image"] = json!("data:image/png;base64,Ynll");
+        let second = project.save(&workflow).expect("second project save");
+
+        assert_ne!(first.manifest.media_files, second.manifest.media_files);
+        assert!(!stale_file.exists());
+        assert!(root.join(&second.manifest.media_files[0]).is_file());
+        assert!(untracked_file.is_file());
 
         let _ = std::fs::remove_dir_all(root);
     }
