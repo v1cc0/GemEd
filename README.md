@@ -77,6 +77,8 @@ cargo clippy --workspace --all-targets --features desktop -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features --features web -- -D warnings
 ```
 
+CI mirrors these gates and runs a Dioxus build matrix for web, Linux desktop, and Windows desktop in `.github/workflows/ci.yml`.
+
 ## Notes
 
 This repo includes `.cargo/config.toml` to prevent host-only linker flags from leaking into WASM builds. Without it, user/global Cargo configs that pass ELF linker options can make `rust-lld` fail for `wasm32-unknown-unknown`.
