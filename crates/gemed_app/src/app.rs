@@ -48,7 +48,15 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .canvas-wrap { position: relative; overflow: auto; background-image: linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px); background-size: 32px 32px; }
 .canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; }
 .edge-layer { position: absolute; inset: 0; width: 1400px; height: 900px; pointer-events: none; overflow: visible; }
-.edge { stroke: rgba(125, 211, 252, .64); stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+.edge-group { pointer-events: none; }
+.edge-hit { stroke: transparent; stroke-width: 14; fill: none; pointer-events: stroke; cursor: pointer; }
+.edge { stroke: rgba(125, 211, 252, .64); stroke-width: 2.5; fill: none; marker-end: url(#arrow); pointer-events: none; }
+.edge-group:hover .edge { stroke: rgba(186, 230, 253, .95); stroke-width: 3; }
+.edge-action { pointer-events: auto; cursor: pointer; opacity: .42; transition: opacity .12s ease, transform .12s ease; }
+.edge-group:hover .edge-action { opacity: 1; }
+.edge-action:hover { transform: scale(1.08); }
+.edge-delete-dot { fill: rgba(127, 29, 29, .9); stroke: rgba(248, 113, 113, .68); stroke-width: 1.5; filter: drop-shadow(0 7px 14px rgba(0, 0, 0, .35)); }
+.edge-delete-label { fill: #fecaca; font-size: 14px; font-weight: 800; pointer-events: none; user-select: none; }
 .node { position: absolute; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: visible; }
 .node.draggable { cursor: grab; user-select: none; }
 .node.dragging { cursor: grabbing; opacity: .92; }
@@ -561,11 +569,13 @@ fn Sidebar(
                                             class: "mini-action",
                                             onclick: move |_| {
                                                 let edge_id = edge_id.clone();
-                                                mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
-                                                    remove_edge(workflow, &edge_id)
-                                                        .map(|edge| format!("Removed edge `{}` ({} → {}).", edge.id, edge.source, edge.target))
-                                                        .map_err(|err| err.to_string())
-                                                });
+                                                remove_edge_by_id(
+                                                    &edge_id,
+                                                    &mut workflow,
+                                                    &mut json_text,
+                                                    &mut message,
+                                                    &mut undo_stack,
+                                                );
                                             },
                                             "Remove"
                                         }
@@ -668,7 +678,64 @@ fn WorkflowCanvas(
                         }
                         for edge in wf.edges.iter() {
                             if let Some(path) = edge_path(&wf, edge) {
-                                path { class: "edge", d: "{path}" }
+                                {
+                                    let edge_id = edge.id.clone();
+                                    let action = edge_delete_action(&wf, edge);
+                                    rsx! {
+                                        g { class: "edge-group",
+                                            path {
+                                                class: "edge-hit",
+                                                d: "{path}",
+                                                onmouseup: move |event: MouseEvent| {
+                                                    event.stop_propagation();
+                                                },
+                                                onclick: {
+                                                    let edge_id = edge_id.clone();
+                                                    move |event: MouseEvent| {
+                                                        event.stop_propagation();
+                                                        remove_edge_by_id(
+                                                            &edge_id,
+                                                            &mut workflow,
+                                                            &mut json_text,
+                                                            &mut message,
+                                                            &mut undo_stack,
+                                                        );
+                                                    }
+                                                },
+                                            }
+                                            path { class: "edge", d: "{path}" }
+                                            if let Some(action) = action {
+                                                g {
+                                                    class: "edge-action",
+                                                    transform: "translate({action.x:.1} {action.y:.1})",
+                                                    onmouseup: move |event: MouseEvent| {
+                                                        event.stop_propagation();
+                                                    },
+                                                    onclick: {
+                                                        let edge_id = edge_id.clone();
+                                                        move |event: MouseEvent| {
+                                                            event.stop_propagation();
+                                                            remove_edge_by_id(
+                                                                &edge_id,
+                                                                &mut workflow,
+                                                                &mut json_text,
+                                                                &mut message,
+                                                                &mut undo_stack,
+                                                            );
+                                                        }
+                                                    },
+                                                    circle { class: "edge-delete-dot", r: "10" }
+                                                    text {
+                                                        class: "edge-delete-label",
+                                                        text_anchor: "middle",
+                                                        dominant_baseline: "central",
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -827,18 +894,44 @@ fn NodeCard(
 }
 
 fn edge_path(workflow: &WorkflowFile, edge: &WorkflowEdge) -> Option<String> {
-    let source = workflow.nodes.iter().find(|node| node.id == edge.source)?;
-    let target = workflow.nodes.iter().find(|node| node.id == edge.target)?;
-    let x1 = source.position.x + 248.0;
-    let y1 = handle_y(source, edge.source_handle.as_deref(), HandleSide::Source);
-    let x2 = target.position.x;
-    let y2 = handle_y(target, edge.target_handle.as_deref(), HandleSide::Target);
+    let points = edge_points(workflow, edge)?;
+    let x1 = points.source.x;
+    let y1 = points.source.y;
+    let x2 = points.target.x;
+    let y2 = points.target.y;
     let mid = ((x2 - x1).abs() * 0.5).clamp(80.0, 220.0);
     Some(format!(
         "M {x1:.1} {y1:.1} C {cx1:.1} {y1:.1}, {cx2:.1} {y2:.1}, {x2:.1} {y2:.1}",
         cx1 = x1 + mid,
         cx2 = x2 - mid
     ))
+}
+
+fn edge_delete_action(workflow: &WorkflowFile, edge: &WorkflowEdge) -> Option<Position> {
+    let points = edge_points(workflow, edge)?;
+    Some(Position {
+        x: (points.source.x + points.target.x) / 2.0,
+        y: (points.source.y + points.target.y) / 2.0 - 16.0,
+    })
+}
+
+fn edge_points(workflow: &WorkflowFile, edge: &WorkflowEdge) -> Option<EdgePoints> {
+    let source = workflow.nodes.iter().find(|node| node.id == edge.source)?;
+    let target = workflow.nodes.iter().find(|node| node.id == edge.target)?;
+    let x1 = source.position.x + 248.0;
+    let y1 = handle_y(source, edge.source_handle.as_deref(), HandleSide::Source);
+    let x2 = target.position.x;
+    let y2 = handle_y(target, edge.target_handle.as_deref(), HandleSide::Target);
+    Some(EdgePoints {
+        source: Position { x: x1, y: y1 },
+        target: Position { x: x2, y: y2 },
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EdgePoints {
+    source: Position,
+    target: Position,
 }
 
 fn handle_y(node: &WorkflowNode, handle_id: Option<&str>, side: HandleSide) -> f64 {
@@ -877,6 +970,26 @@ fn edge_label(edge: &WorkflowEdge) -> String {
         edge.target,
         edge.target_handle.as_deref().unwrap_or("")
     )
+}
+
+fn remove_edge_by_id(
+    edge_id: &str,
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+) {
+    let edge_id = edge_id.to_string();
+    mutate_workflow(workflow, json_text, message, undo_stack, move |workflow| {
+        remove_edge(workflow, &edge_id)
+            .map(|edge| {
+                format!(
+                    "Removed edge `{}` ({} → {}).",
+                    edge.id, edge.source, edge.target
+                )
+            })
+            .map_err(|err| err.to_string())
+    });
 }
 
 fn begin_handle_connection(
