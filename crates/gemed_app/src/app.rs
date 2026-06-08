@@ -2,9 +2,8 @@ use dioxus::html::{InteractionLocation, MouseEvent};
 use dioxus::prelude::*;
 use gemed_core::{
     NodeStatus, Position, WorkflowEdge, WorkflowFile, WorkflowNode, WorkflowUndoStack,
-    add_edge_between, move_node_by, remove_edge, remove_edges_between_handles, select_node,
-    selected_handle_or_first, selected_node_id, set_node_position, source_handle_options,
-    target_handle_options,
+    add_edge_between, move_node_by, remove_edge, select_node, selected_node_id, set_node_position,
+    source_handle_options, target_handle_options,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -50,7 +49,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .canvas { position: relative; width: 1400px; height: 900px; margin: 1.25rem; }
 .edge-layer { position: absolute; inset: 0; width: 1400px; height: 900px; pointer-events: none; overflow: visible; }
 .edge { stroke: rgba(125, 211, 252, .64); stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
-.node { position: absolute; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: hidden; }
+.node { position: absolute; width: 15.5rem; min-height: 8rem; border-radius: 1rem; border: 1px solid rgba(148, 163, 184, .24); background: linear-gradient(145deg, rgba(30, 41, 59, .96), rgba(15, 23, 42, .96)); box-shadow: 0 22px 60px rgba(0, 0, 0, .34); overflow: visible; }
 .node.draggable { cursor: grab; user-select: none; }
 .node.dragging { cursor: grabbing; opacity: .92; }
 .node.input { border-color: rgba(52, 211, 153, .38); }
@@ -67,6 +66,19 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .badge.loading { color: #bfdbfe; border-color: rgba(96, 165, 250, .32); }
 .node-body { padding: .8rem .85rem; color: #b9c6df; font-size: .82rem; line-height: 1.4; }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
+.handle-column { position: absolute; top: 3.25rem; bottom: .75rem; display: flex; flex-direction: column; justify-content: center; gap: .28rem; z-index: 4; pointer-events: auto; }
+.handle-column.target { left: -.55rem; align-items: flex-start; }
+.handle-column.source { right: -.55rem; align-items: flex-end; }
+.handle-button { border: none; background: transparent; color: #dbeafe; cursor: crosshair; display: flex; align-items: center; gap: .28rem; padding: .02rem; max-width: 8rem; }
+.handle-button.source { flex-direction: row-reverse; }
+.handle-dot { width: .72rem; height: .72rem; flex: 0 0 .72rem; border-radius: 999px; border: 2px solid rgba(125, 211, 252, .78); background: #0f172a; box-shadow: 0 0 0 3px rgba(14, 165, 233, .12); }
+.handle-button.target .handle-dot { border-color: rgba(96, 165, 250, .8); }
+.handle-button.source .handle-dot { border-color: rgba(45, 212, 191, .8); }
+.handle-button.pending .handle-dot { border-color: rgba(250, 204, 21, .95); box-shadow: 0 0 0 5px rgba(250, 204, 21, .2); }
+.handle-button.ready .handle-dot { border-color: rgba(74, 222, 128, .95); box-shadow: 0 0 0 5px rgba(74, 222, 128, .18); }
+.handle-button:hover .handle-dot { transform: scale(1.12); }
+.handle-label { pointer-events: none; opacity: 0; white-space: nowrap; border-radius: 999px; padding: .14rem .38rem; color: #dbeafe; background: rgba(15, 23, 42, .94); border: 1px solid rgba(148, 163, 184, .22); font-size: .64rem; line-height: 1.1; box-shadow: 0 8px 20px rgba(0, 0, 0, .24); transition: opacity .12s ease; }
+.handle-button:hover .handle-label, .handle-button.pending .handle-label, .handle-button.ready .handle-label { opacity: 1; }
 .type-list { display: flex; flex-direction: column; gap: .35rem; }
 .type-row { display: flex; justify-content: space-between; gap: .75rem; color: #b9c6df; font-size: .86rem; }
 .type-row code { color: #dbeafe; }
@@ -77,10 +89,8 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .event-message { color: #9fb0cf; font-size: .76rem; line-height: 1.35; }
 .edit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; }
 .edit-grid .action { padding: .48rem .4rem; }
-.handle-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .65rem; }
-.handle-grid label { display: flex; flex-direction: column; gap: .25rem; color: #9fb0cf; font-size: .72rem; }
-.handle-grid select { width: 100%; border: 1px solid rgba(148, 163, 184, .22); border-radius: .65rem; padding: .42rem .5rem; color: #e5ecff; background: rgba(2, 6, 23, .72); }
 .handle-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .5rem; }
+.handle-hint { border: 1px dashed rgba(125, 211, 252, .28); border-radius: .75rem; padding: .55rem .65rem; color: #b9c6df; background: rgba(14, 165, 233, .08); font-size: .78rem; line-height: 1.35; }
 .viewport-status { color: #9fb0cf; font-size: .78rem; margin-top: .55rem; }
 .edge-list { display: flex; flex-direction: column; gap: .4rem; max-height: 9rem; overflow: auto; }
 .edge-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-radius: .7rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); padding: .45rem .55rem; }
@@ -104,14 +114,15 @@ pub fn App() -> Element {
     let undo_stack = use_signal(WorkflowUndoStack::default);
     let drag_state = use_signal(|| None::<DragState>);
     let viewport = use_signal(CanvasViewport::default);
+    let connection_draft = use_signal(|| None::<ConnectionDraft>);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
-            Header { workflow, json_text, message, execution_report, undo_stack, drag_state }
+            Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
             main { class: "main",
-                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, viewport }
+                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, viewport, connection_draft }
             }
         }
     }
@@ -125,6 +136,7 @@ fn Header(
     mut execution_report: Signal<Option<SimpleExecutionReport>>,
     mut undo_stack: Signal<WorkflowUndoStack>,
     mut drag_state: Signal<Option<DragState>>,
+    mut connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
     rsx! {
         header { class: "header",
@@ -144,6 +156,7 @@ fn Header(
                                 execution_report.set(None);
                                 undo_stack.write().clear();
                                 drag_state.set(None);
+                                connection_draft.set(None);
                                 message.set(Message::ok("Started a blank workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize blank workflow: {err}"))),
@@ -162,6 +175,7 @@ fn Header(
                                 execution_report.set(None);
                                 undo_stack.write().clear();
                                 drag_state.set(None);
+                                connection_draft.set(None);
                                 message.set(Message::ok("Reset to built-in starter workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize sample workflow: {err}"))),
@@ -183,6 +197,7 @@ fn Header(
                             execution_report.set(None);
                             undo_stack.write().clear();
                             drag_state.set(None);
+                            connection_draft.set(None);
                             message.set(Message::ok(summary));
                         }
                         Err(err) => message.set(Message::err(format!("Workflow JSON rejected: {err}"))),
@@ -205,6 +220,7 @@ fn Header(
                             execution_report.set(Some(result.report));
                             undo_stack.write().clear();
                             drag_state.set(None);
+                            connection_draft.set(None);
                             message.set(Message::ok(format!("Local executor finished: {summary}.")));
                         }
                         Err(err) => {
@@ -231,6 +247,7 @@ fn Header(
                                 execution_report.set(Some(result.report));
                                 undo_stack.write().clear();
                                 drag_state.set(None);
+                                connection_draft.set(None);
                                 message.set(Message::ok(format!("Mock provider run finished: {summary}.")));
                             }
                             Err(err) => {
@@ -281,6 +298,7 @@ fn Header(
                                     execution_report.set(None);
                                     undo_stack.write().clear();
                                     drag_state.set(None);
+                                    connection_draft.set(None);
                                     message.set(Message::ok(format!(
                                         "Loaded {} slot `{DEFAULT_AUTOSAVE_SLOT}`.",
                                         storage_backend_label()
@@ -308,9 +326,8 @@ fn Sidebar(
     execution_report: Signal<Option<SimpleExecutionReport>>,
     mut undo_stack: Signal<WorkflowUndoStack>,
     mut viewport: Signal<CanvasViewport>,
+    mut connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
-    let mut source_handle_choice = use_signal(String::new);
-    let mut target_handle_choice = use_signal(String::new);
     let wf = workflow.read();
     let counts = wf.node_type_counts();
     let can_undo = undo_stack.read().can_undo();
@@ -336,32 +353,19 @@ fn Sidebar(
             )
         })
         .unwrap_or_else(|| "No node selected. Click a card in the canvas.".to_string());
-    let handle_source = selected_id.clone().unwrap_or_default();
-    let handle_target = next_node_id.clone().unwrap_or_default();
-    let source_handles = selected_id
+    let draft_summary = connection_draft
+        .read()
         .as_ref()
-        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
-        .map(source_handle_options)
-        .unwrap_or_default();
-    let target_handles = next_node_id
-        .as_ref()
-        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
-        .map(target_handle_options)
-        .unwrap_or_default();
-    let selected_source_handle =
-        selected_handle_or_first(&source_handles, source_handle_choice.read().as_str());
-    let selected_target_handle =
-        selected_handle_or_first(&target_handles, target_handle_choice.read().as_str());
-    let can_connect_handles =
-        !handle_source.is_empty() && !handle_target.is_empty() && !target_handles.is_empty();
-    let handle_source_for_connect = handle_source.clone();
-    let handle_target_for_connect = handle_target.clone();
-    let source_handle_for_connect = selected_source_handle.clone();
-    let target_handle_for_connect = selected_target_handle.clone();
-    let handle_source_for_disconnect = handle_source.clone();
-    let handle_target_for_disconnect = handle_target.clone();
-    let source_handle_for_disconnect = selected_source_handle.clone();
-    let target_handle_for_disconnect = selected_target_handle.clone();
+        .map(|draft| {
+            format!(
+                "Connecting from `{}`:{}.",
+                draft.source_node_id, draft.source_handle
+            )
+        })
+        .unwrap_or_else(|| {
+            "Drag or press a right-side source handle, then release on a left-side target handle."
+                .to_string()
+        });
     let msg = message.read();
     let order_text = match execution_order(&wf) {
         Ok(items) if items.is_empty() => "Order: no nodes".to_string(),
@@ -571,89 +575,16 @@ fn Sidebar(
                         }
                     }
                 }
-                p { "Handle connect uses the selected node as source and the next node as target." }
-                div { class: "handle-grid",
-                    label {
-                        "Source"
-                        select {
-                            id: "source-handle-select",
-                            disabled: source_handles.is_empty(),
-                            value: "{selected_source_handle}",
-                            onchange: move |event| source_handle_choice.set(event.value()),
-                            for handle in source_handles.iter() {
-                                option { value: "{handle.id}", "{handle.label}" }
-                            }
-                        }
-                    }
-                    label {
-                        "Target"
-                        select {
-                            id: "target-handle-select",
-                            disabled: target_handles.is_empty(),
-                            value: "{selected_target_handle}",
-                            onchange: move |event| target_handle_choice.set(event.value()),
-                            for handle in target_handles.iter() {
-                                option { value: "{handle.id}", "{handle.label}" }
-                            }
-                        }
-                    }
-                }
+                p { class: "handle-hint", "{draft_summary}" }
                 div { class: "handle-actions",
                     button {
                         class: "action",
-                        disabled: !can_connect_handles,
+                        disabled: connection_draft.read().is_none(),
                         onclick: move |_| {
-                            let source = handle_source_for_connect.clone();
-                            let target = handle_target_for_connect.clone();
-                            let source_handle = source_handle_for_connect.clone();
-                            let target_handle = target_handle_for_connect.clone();
-                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
-                                if source.is_empty() || target.is_empty() {
-                                    return Err("Select a source node with a next target node first.".to_string());
-                                }
-                                let edge = add_edge_between(
-                                    workflow,
-                                    &source,
-                                    &target,
-                                    optional_handle(&source_handle),
-                                    optional_handle(&target_handle),
-                                )
-                                .map_err(|err| err.to_string())?;
-                                Ok(format!(
-                                    "Connected `{}`:{} → `{}`:{}.",
-                                    edge.source,
-                                    edge.source_handle.as_deref().unwrap_or(""),
-                                    edge.target,
-                                    edge.target_handle.as_deref().unwrap_or("")
-                                ))
-                            });
+                            connection_draft.set(None);
+                            message.set(Message::ok("Cancelled pending handle connection."));
                         },
-                        "Connect Handles"
-                    }
-                    button {
-                        class: "action",
-                        disabled: !can_connect_handles,
-                        onclick: move |_| {
-                            let source = handle_source_for_disconnect.clone();
-                            let target = handle_target_for_disconnect.clone();
-                            let source_handle = source_handle_for_disconnect.clone();
-                            let target_handle = target_handle_for_disconnect.clone();
-                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
-                                let removed = remove_edges_between_handles(
-                                    workflow,
-                                    &source,
-                                    &target,
-                                    optional_handle_ref(&source_handle),
-                                    optional_handle_ref(&target_handle),
-                                )
-                                .map_err(|err| err.to_string())?;
-                                Ok(format!(
-                                    "Disconnected {} handle edge(s) from `{source}` to `{target}`.",
-                                    removed.len()
-                                ))
-                            });
-                        },
-                        "Disconnect"
+                        "Cancel Connect"
                     }
                 }
             }
@@ -700,6 +631,7 @@ fn WorkflowCanvas(
     undo_stack: Signal<WorkflowUndoStack>,
     drag_state: Signal<Option<DragState>>,
     viewport: Signal<CanvasViewport>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
     let wf = workflow.read();
     let viewport_snapshot = *viewport.read();
@@ -726,6 +658,7 @@ fn WorkflowCanvas(
                     },
                     onmouseup: move |_| {
                         finish_drag(workflow, json_text, message, drag_state);
+                        cancel_canvas_connection(message, connection_draft);
                     },
                     svg { class: "edge-layer", view_box: "0 0 1400 900",
                         defs {
@@ -740,7 +673,7 @@ fn WorkflowCanvas(
                         }
                     }
                     for node in wf.nodes.iter() {
-                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state, viewport }
+                        NodeCard { node: node.clone(), workflow, json_text, message, undo_stack, drag_state, viewport, connection_draft }
                     }
                 }
             }
@@ -757,6 +690,7 @@ fn NodeCard(
     mut undo_stack: Signal<WorkflowUndoStack>,
     drag_state: Signal<Option<DragState>>,
     viewport: Signal<CanvasViewport>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
 ) -> Element {
     let style = format!(
         "left: {}px; top: {}px;",
@@ -776,6 +710,9 @@ fn NodeCard(
     let label = node.display_label();
     let preview = node.preview_text();
     let node_id = node.id.clone();
+    let source_handles = source_handle_options(&node);
+    let target_handles = target_handle_options(&node);
+    let draft = connection_draft.read().clone();
 
     rsx! {
         article {
@@ -794,6 +731,86 @@ fn NodeCard(
                     viewport,
                 );
             },
+            div { class: "handle-column target",
+                for handle in target_handles.iter() {
+                    {
+                        let target_node_id = node.id.clone();
+                        let target_handle = handle.id.clone();
+                        let title = format!("Target: {}", handle.label);
+                        let is_ready = draft
+                            .as_ref()
+                            .is_some_and(|draft| draft.source_node_id != target_node_id);
+                        let class = if is_ready {
+                            "handle-button target ready"
+                        } else {
+                            "handle-button target"
+                        };
+                        rsx! {
+                            button {
+                                class: "{class}",
+                                title: "{title}",
+                                onmousedown: move |event: MouseEvent| {
+                                    event.stop_propagation();
+                                },
+                                onmouseup: move |event: MouseEvent| {
+                                    event.stop_propagation();
+                                    finish_handle_connection(
+                                        &target_node_id,
+                                        &target_handle,
+                                        &mut workflow,
+                                        &mut json_text,
+                                        &mut message,
+                                        &mut undo_stack,
+                                        connection_draft,
+                                    );
+                                },
+                                span { class: "handle-dot" }
+                                span { class: "handle-label", "{handle.label}" }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "handle-column source",
+                for handle in source_handles.iter() {
+                    {
+                        let source_node_id = node.id.clone();
+                        let source_handle = handle.id.clone();
+                        let title = format!("Source: {}", handle.label);
+                        let is_pending = draft
+                            .as_ref()
+                            .is_some_and(|draft| {
+                                draft.source_node_id == source_node_id
+                                    && draft.source_handle == source_handle
+                            });
+                        let class = if is_pending {
+                            "handle-button source pending"
+                        } else {
+                            "handle-button source"
+                        };
+                        rsx! {
+                            button {
+                                class: "{class}",
+                                title: "{title}",
+                                onmousedown: move |event: MouseEvent| {
+                                    event.stop_propagation();
+                                    begin_handle_connection(
+                                        &source_node_id,
+                                        &source_handle,
+                                        &mut message,
+                                        connection_draft,
+                                    );
+                                },
+                                onmouseup: move |event: MouseEvent| {
+                                    event.stop_propagation();
+                                },
+                                span { class: "handle-dot" }
+                                span { class: "handle-label", "{handle.label}" }
+                            }
+                        }
+                    }
+                }
+            }
             div { class: "node-head",
                 div { class: "node-title", "{label}" }
                 span { class: "{status_class}", "{status.label()}" }
@@ -809,13 +826,13 @@ fn NodeCard(
     }
 }
 
-fn edge_path(workflow: &WorkflowFile, edge: &gemed_core::WorkflowEdge) -> Option<String> {
+fn edge_path(workflow: &WorkflowFile, edge: &WorkflowEdge) -> Option<String> {
     let source = workflow.nodes.iter().find(|node| node.id == edge.source)?;
     let target = workflow.nodes.iter().find(|node| node.id == edge.target)?;
     let x1 = source.position.x + 248.0;
-    let y1 = source.position.y + 64.0;
+    let y1 = handle_y(source, edge.source_handle.as_deref(), HandleSide::Source);
     let x2 = target.position.x;
-    let y2 = target.position.y + 64.0;
+    let y2 = handle_y(target, edge.target_handle.as_deref(), HandleSide::Target);
     let mid = ((x2 - x1).abs() * 0.5).clamp(80.0, 220.0);
     Some(format!(
         "M {x1:.1} {y1:.1} C {cx1:.1} {y1:.1}, {cx2:.1} {y2:.1}, {x2:.1} {y2:.1}",
@@ -824,12 +841,32 @@ fn edge_path(workflow: &WorkflowFile, edge: &gemed_core::WorkflowEdge) -> Option
     ))
 }
 
-fn optional_handle(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
+fn handle_y(node: &WorkflowNode, handle_id: Option<&str>, side: HandleSide) -> f64 {
+    let handles = match side {
+        HandleSide::Source => source_handle_options(node),
+        HandleSide::Target => target_handle_options(node),
+    };
+    let count = handles.len().max(1) as f64;
+    let index = handle_id
+        .and_then(|handle_id| handles.iter().position(|handle| handle.id == handle_id))
+        .map_or((count - 1.0) / 2.0, |index| index as f64);
+    let usable = 76.0;
+    let offset = if count <= 1.0 {
+        64.0
+    } else {
+        42.0 + (usable * index / (count - 1.0))
+    };
+    node.position.y + offset
 }
 
-fn optional_handle_ref(value: &str) -> Option<&str> {
-    (!value.is_empty()).then_some(value)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandleSide {
+    Source,
+    Target,
+}
+
+fn optional_handle(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn edge_label(edge: &WorkflowEdge) -> String {
@@ -840,6 +877,73 @@ fn edge_label(edge: &WorkflowEdge) -> String {
         edge.target,
         edge.target_handle.as_deref().unwrap_or("")
     )
+}
+
+fn begin_handle_connection(
+    source_node_id: &str,
+    source_handle: &str,
+    message: &mut Signal<Message>,
+    mut connection_draft: Signal<Option<ConnectionDraft>>,
+) {
+    connection_draft.set(Some(ConnectionDraft {
+        source_node_id: source_node_id.to_string(),
+        source_handle: source_handle.to_string(),
+    }));
+    message.set(Message::ok(format!(
+        "Connecting from `{source_node_id}`:{source_handle}. Release on a target handle."
+    )));
+}
+
+fn finish_handle_connection(
+    target_node_id: &str,
+    target_handle: &str,
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+    mut connection_draft: Signal<Option<ConnectionDraft>>,
+) {
+    let Some(draft) = connection_draft.read().clone() else {
+        message.set(Message::err(
+            "Start from a source handle before connecting to a target handle.",
+        ));
+        return;
+    };
+
+    let source_node_id = draft.source_node_id.clone();
+    let source_handle = draft.source_handle.clone();
+    let target_node_id = target_node_id.to_string();
+    let target_handle = target_handle.to_string();
+    mutate_workflow(workflow, json_text, message, undo_stack, move |workflow| {
+        let edge = add_edge_between(
+            workflow,
+            &source_node_id,
+            &target_node_id,
+            optional_handle(&source_handle),
+            optional_handle(&target_handle),
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(format!(
+            "Connected `{}`:{} → `{}`:{} as `{}`.",
+            edge.source,
+            edge.source_handle.as_deref().unwrap_or(""),
+            edge.target,
+            edge.target_handle.as_deref().unwrap_or(""),
+            edge.id
+        ))
+    });
+    connection_draft.set(None);
+}
+
+fn cancel_canvas_connection(
+    mut message: Signal<Message>,
+    mut connection_draft: Signal<Option<ConnectionDraft>>,
+) {
+    if connection_draft.read().is_none() {
+        return;
+    }
+    connection_draft.set(None);
+    message.set(Message::ok("Cancelled pending handle connection."));
 }
 
 fn mutate_selected_node(
@@ -1133,4 +1237,10 @@ struct DragState {
     start_client_y: f64,
     start_position: Position,
     start_viewport: CanvasViewport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionDraft {
+    source_node_id: String,
+    source_handle: String,
 }
