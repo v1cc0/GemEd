@@ -21,6 +21,7 @@ Implemented now:
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
+- Desktop-only native Open File / Save As actions for workflow JSON files
 - Web and Linux desktop build verification
 - Windows desktop foundation through Dioxus desktop feature and Windows GUI subsystem setting
 
@@ -29,7 +30,7 @@ Not implemented yet:
 - Full editable canvas UX: drag-to-create group selection boxes, group move handles, and polished drag/handle affordances
 - Live Provider/API execution beyond mock providers
 - Media/video/3D nodes
-- Native file dialogs, explicit project picker/save-as flows, and external media storage
+- Explicit multi-file project picker flows and external media storage
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 

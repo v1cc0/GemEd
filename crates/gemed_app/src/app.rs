@@ -299,6 +299,15 @@ fn Header(
                     },
                     "Export JSON"
                 }
+                DesktopFileActions {
+                    workflow,
+                    json_text,
+                    message,
+                    execution_report,
+                    undo_stack,
+                    drag_state,
+                    connection_draft,
+                }
                 button {
                     class: "action",
                     onclick: move |_| {
@@ -345,6 +354,92 @@ fn Header(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn DesktopFileActions(
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    message: Signal<Message>,
+    execution_report: Signal<Option<SimpleExecutionReport>>,
+    undo_stack: Signal<WorkflowUndoStack>,
+    drag_state: Signal<Option<DragState>>,
+    connection_draft: Signal<Option<ConnectionDraft>>,
+) -> Element {
+    #[cfg(feature = "desktop")]
+    {
+        let mut workflow = workflow;
+        let mut json_text = json_text;
+        let mut message = message;
+        let mut execution_report = execution_report;
+        let mut undo_stack = undo_stack;
+        let mut drag_state = drag_state;
+        let mut connection_draft = connection_draft;
+
+        rsx! {
+            button {
+                class: "action",
+                onclick: move |_| match open_workflow_from_dialog() {
+                    Ok(Some((next, path))) => match next.to_pretty_json() {
+                        Ok(json) => {
+                            let summary = format!(
+                                "Opened `{}` from `{}` with {} nodes and {} edges.",
+                                next.name,
+                                path.display(),
+                                next.nodes.len(),
+                                next.edges.len()
+                            );
+                            workflow.set(next);
+                            json_text.set(json);
+                            execution_report.set(None);
+                            undo_stack.write().clear();
+                            drag_state.set(None);
+                            connection_draft.set(None);
+                            message.set(Message::ok(summary));
+                        }
+                        Err(err) => message.set(Message::err(format!(
+                            "Opened file but failed to export JSON: {err}"
+                        ))),
+                    },
+                    Ok(None) => message.set(Message::ok("Open file cancelled.")),
+                    Err(err) => message.set(Message::err(format!("Open file failed: {err}"))),
+                },
+                "Open File"
+            }
+            button {
+                class: "action",
+                onclick: move |_| {
+                    let current = workflow.read().clone();
+                    match save_workflow_to_dialog(&current) {
+                        Ok(Some((path, json))) => {
+                            json_text.set(json);
+                            message.set(Message::ok(format!(
+                                "Saved `{}` to `{}`.",
+                                current.name,
+                                path.display()
+                            )));
+                        }
+                        Ok(None) => message.set(Message::ok("Save As cancelled.")),
+                        Err(err) => message.set(Message::err(format!("Save As failed: {err}"))),
+                    }
+                },
+                "Save As"
+            }
+        }
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = (
+            &workflow,
+            &json_text,
+            &message,
+            &execution_report,
+            &undo_stack,
+            &drag_state,
+            &connection_draft,
+        );
+        rsx! {}
     }
 }
 
@@ -1917,6 +2012,81 @@ fn load_autosave_workflow() -> Result<WorkflowFile, gemed_storage::StorageError>
 }
 
 #[cfg(feature = "desktop")]
+fn open_workflow_from_dialog() -> Result<Option<(WorkflowFile, std::path::PathBuf)>, String> {
+    let Some(path) = workflow_json_dialog().pick_file() else {
+        return Ok(None);
+    };
+    let json = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+    let workflow = WorkflowFile::from_json_str(&json)
+        .map_err(|err| format!("workflow JSON rejected in `{}`: {err}", path.display()))?;
+    Ok(Some((workflow, path)))
+}
+
+#[cfg(feature = "desktop")]
+fn save_workflow_to_dialog(
+    workflow: &WorkflowFile,
+) -> Result<Option<(std::path::PathBuf, String)>, String> {
+    let Some(path) = workflow_json_dialog()
+        .set_file_name(workflow_json_filename(&workflow.name))
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    let path = ensure_json_extension(path);
+    let json = workflow
+        .to_pretty_json()
+        .map_err(|err| format!("failed to export workflow JSON: {err}"))?;
+    std::fs::write(&path, json.as_bytes())
+        .map_err(|err| format!("failed to write `{}`: {err}", path.display()))?;
+    Ok(Some((path, json)))
+}
+
+#[cfg(feature = "desktop")]
+fn workflow_json_dialog() -> rfd::FileDialog {
+    rfd::FileDialog::new().add_filter("GemEd workflow JSON", &["json"])
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn workflow_json_filename(name: &str) -> String {
+    let mut base = String::new();
+    let mut previous_separator = false;
+    for ch in name.trim().chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, '-' | '_') {
+            Some(ch)
+        } else {
+            Some('-')
+        };
+
+        if let Some(ch) = next {
+            if ch == '-' || ch == '_' {
+                if previous_separator {
+                    continue;
+                }
+                previous_separator = true;
+            } else {
+                previous_separator = false;
+            }
+            base.push(ch);
+        }
+    }
+
+    let base = base.trim_matches(['-', '_']).trim();
+    let base = if base.is_empty() { "workflow" } else { base };
+    format!("{base}.json")
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn ensure_json_extension(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if !extension.is_empty() => path,
+        _ => path.with_extension("json"),
+    }
+}
+
+#[cfg(feature = "desktop")]
 fn platform_storage()
 -> Result<gemed_storage::desktop::DesktopWorkflowStorage, gemed_storage::StorageError> {
     gemed_storage::desktop::DesktopWorkflowStorage::new()
@@ -2049,4 +2219,35 @@ struct PanState {
 struct ConnectionDraft {
     source_node_id: String,
     source_handle: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_json_extension, workflow_json_filename};
+    use std::path::PathBuf;
+
+    #[test]
+    fn workflow_json_filename_keeps_safe_names_predictable() {
+        assert_eq!(
+            workflow_json_filename("GemEd Dioxus Starter"),
+            "gemed-dioxus-starter.json"
+        );
+        assert_eq!(
+            workflow_json_filename("  Media/Provider: v1  "),
+            "media-provider-v1.json"
+        );
+        assert_eq!(workflow_json_filename(""), "workflow.json");
+    }
+
+    #[test]
+    fn ensure_json_extension_only_adds_missing_extension() {
+        assert_eq!(
+            ensure_json_extension(PathBuf::from("workflow")),
+            PathBuf::from("workflow.json")
+        );
+        assert_eq!(
+            ensure_json_extension(PathBuf::from("workflow.gemed")),
+            PathBuf::from("workflow.gemed")
+        );
+    }
 }
