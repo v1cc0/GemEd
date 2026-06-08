@@ -1,8 +1,9 @@
 use dioxus::html::{InteractionLocation, MouseEvent};
 use dioxus::prelude::*;
 use gemed_core::{
-    NodeStatus, Position, WorkflowFile, WorkflowNode, WorkflowUndoStack, add_edge_between,
-    move_node_by, remove_edge, select_node, selected_node_id, set_node_position,
+    NodeStatus, NodeType, Position, WorkflowEdge, WorkflowFile, WorkflowNode, WorkflowUndoStack,
+    add_edge_between, move_node_by, remove_edge, remove_edges_between_handles, select_node,
+    selected_node_id, set_node_position,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -75,6 +76,10 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .event-message { color: #9fb0cf; font-size: .76rem; line-height: 1.35; }
 .edit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; }
 .edit-grid .action { padding: .48rem .4rem; }
+.handle-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .65rem; }
+.handle-grid label { display: flex; flex-direction: column; gap: .25rem; color: #9fb0cf; font-size: .72rem; }
+.handle-grid select { width: 100%; border: 1px solid rgba(148, 163, 184, .22); border-radius: .65rem; padding: .42rem .5rem; color: #e5ecff; background: rgba(2, 6, 23, .72); }
+.handle-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .5rem; }
 .edge-list { display: flex; flex-direction: column; gap: .4rem; max-height: 9rem; overflow: auto; }
 .edge-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-radius: .7rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); padding: .45rem .55rem; }
 .edge-row code { color: #dbeafe; font-size: .72rem; overflow-wrap: anywhere; }
@@ -300,6 +305,8 @@ fn Sidebar(
     execution_report: Signal<Option<SimpleExecutionReport>>,
     mut undo_stack: Signal<WorkflowUndoStack>,
 ) -> Element {
+    let mut source_handle_choice = use_signal(String::new);
+    let mut target_handle_choice = use_signal(String::new);
     let wf = workflow.read();
     let counts = wf.node_type_counts();
     let can_undo = undo_stack.read().can_undo();
@@ -323,6 +330,32 @@ fn Sidebar(
             )
         })
         .unwrap_or_else(|| "No node selected. Click a card in the canvas.".to_string());
+    let handle_source = selected_id.clone().unwrap_or_default();
+    let handle_target = next_node_id.clone().unwrap_or_default();
+    let source_handles = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .map(source_handle_options)
+        .unwrap_or_default();
+    let target_handles = next_node_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .map(target_handle_options)
+        .unwrap_or_default();
+    let selected_source_handle =
+        selected_handle_or_first(&source_handles, source_handle_choice.read().as_str());
+    let selected_target_handle =
+        selected_handle_or_first(&target_handles, target_handle_choice.read().as_str());
+    let can_connect_handles =
+        !handle_source.is_empty() && !handle_target.is_empty() && !target_handles.is_empty();
+    let handle_source_for_connect = handle_source.clone();
+    let handle_target_for_connect = handle_target.clone();
+    let source_handle_for_connect = selected_source_handle.clone();
+    let target_handle_for_connect = selected_target_handle.clone();
+    let handle_source_for_disconnect = handle_source.clone();
+    let handle_target_for_disconnect = handle_target.clone();
+    let source_handle_for_disconnect = selected_source_handle.clone();
+    let target_handle_for_disconnect = selected_target_handle.clone();
     let msg = message.read();
     let order_text = match execution_order(&wf) {
         Ok(items) if items.is_empty() => "Order: no nodes".to_string(),
@@ -469,7 +502,7 @@ fn Sidebar(
                                 let edge_id = edge.id.clone();
                                 rsx! {
                                     div { class: "edge-row",
-                                        code { "{edge.source} → {edge.target}" }
+                                        code { "{edge_label(edge)}" }
                                         button {
                                             class: "mini-action",
                                             onclick: move |_| {
@@ -486,6 +519,91 @@ fn Sidebar(
                                 }
                             }
                         }
+                    }
+                }
+                p { "Handle connect uses the selected node as source and the next node as target." }
+                div { class: "handle-grid",
+                    label {
+                        "Source"
+                        select {
+                            id: "source-handle-select",
+                            disabled: source_handles.is_empty(),
+                            value: "{selected_source_handle}",
+                            onchange: move |event| source_handle_choice.set(event.value()),
+                            for handle in source_handles.iter() {
+                                option { value: "{handle.id}", "{handle.label}" }
+                            }
+                        }
+                    }
+                    label {
+                        "Target"
+                        select {
+                            id: "target-handle-select",
+                            disabled: target_handles.is_empty(),
+                            value: "{selected_target_handle}",
+                            onchange: move |event| target_handle_choice.set(event.value()),
+                            for handle in target_handles.iter() {
+                                option { value: "{handle.id}", "{handle.label}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "handle-actions",
+                    button {
+                        class: "action",
+                        disabled: !can_connect_handles,
+                        onclick: move |_| {
+                            let source = handle_source_for_connect.clone();
+                            let target = handle_target_for_connect.clone();
+                            let source_handle = source_handle_for_connect.clone();
+                            let target_handle = target_handle_for_connect.clone();
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
+                                if source.is_empty() || target.is_empty() {
+                                    return Err("Select a source node with a next target node first.".to_string());
+                                }
+                                let edge = add_edge_between(
+                                    workflow,
+                                    &source,
+                                    &target,
+                                    optional_handle(&source_handle),
+                                    optional_handle(&target_handle),
+                                )
+                                .map_err(|err| err.to_string())?;
+                                Ok(format!(
+                                    "Connected `{}`:{} → `{}`:{}.",
+                                    edge.source,
+                                    edge.source_handle.as_deref().unwrap_or(""),
+                                    edge.target,
+                                    edge.target_handle.as_deref().unwrap_or("")
+                                ))
+                            });
+                        },
+                        "Connect Handles"
+                    }
+                    button {
+                        class: "action",
+                        disabled: !can_connect_handles,
+                        onclick: move |_| {
+                            let source = handle_source_for_disconnect.clone();
+                            let target = handle_target_for_disconnect.clone();
+                            let source_handle = source_handle_for_disconnect.clone();
+                            let target_handle = target_handle_for_disconnect.clone();
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
+                                let removed = remove_edges_between_handles(
+                                    workflow,
+                                    &source,
+                                    &target,
+                                    optional_handle_ref(&source_handle),
+                                    optional_handle_ref(&target_handle),
+                                )
+                                .map_err(|err| err.to_string())?;
+                                Ok(format!(
+                                    "Disconnected {} handle edge(s) from `{source}` to `{target}`.",
+                                    removed.len()
+                                ))
+                            });
+                        },
+                        "Disconnect"
                     }
                 }
             }
@@ -646,6 +764,224 @@ fn edge_path(workflow: &WorkflowFile, edge: &gemed_core::WorkflowEdge) -> Option
         cx1 = x1 + mid,
         cx2 = x2 - mid
     ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HandleOption {
+    id: String,
+    label: String,
+}
+
+fn source_handle_options(node: &WorkflowNode) -> Vec<HandleOption> {
+    match node.node_type {
+        NodeType::ImageInput | NodeType::NanoBanana | NodeType::Annotation => {
+            vec![handle("image", "image")]
+        }
+        NodeType::VideoInput
+        | NodeType::GenerateVideo
+        | NodeType::VideoStitch
+        | NodeType::EaseCurve
+        | NodeType::VideoTrim => vec![handle("video", "video")],
+        NodeType::AudioInput | NodeType::GenerateAudio => vec![handle("audio", "audio")],
+        NodeType::Generate3d | NodeType::GlbViewer => vec![handle("3d", "3D")],
+        NodeType::Array => {
+            let mut handles = vec![handle("text", "text / selected")];
+            let items = node
+                .data
+                .get("outputItems")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            for index in 0..items.min(8) {
+                handles.push(handle(format!("text-{index}"), format!("item {index}")));
+            }
+            handles
+        }
+        NodeType::Switch => node
+            .data
+            .get("switches")
+            .and_then(serde_json::Value::as_array)
+            .map(|switches| {
+                switches
+                    .iter()
+                    .filter_map(|switch| {
+                        let id = switch.get("id").and_then(serde_json::Value::as_str)?;
+                        let label = switch
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(id);
+                        Some(handle(id, label))
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![handle("text", "text")]),
+        NodeType::ConditionalSwitch => {
+            let mut handles = node
+                .data
+                .get("rules")
+                .and_then(serde_json::Value::as_array)
+                .map(|rules| {
+                    rules
+                        .iter()
+                        .filter_map(|rule| {
+                            let id = rule.get("id").and_then(serde_json::Value::as_str)?;
+                            let label = rule
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(id);
+                            Some(handle(id, label))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            handles.push(handle("default", "default"));
+            handles
+        }
+        NodeType::Router => vec![
+            handle("text", "text"),
+            handle("image", "image"),
+            handle("video", "video"),
+            handle("audio", "audio"),
+            handle("3d", "3D"),
+        ],
+        NodeType::Prompt
+        | NodeType::PromptConstructor
+        | NodeType::LlmGenerate
+        | NodeType::Output => {
+            vec![handle("text", "text")]
+        }
+        NodeType::SplitGrid
+        | NodeType::OutputGallery
+        | NodeType::ImageCompare
+        | NodeType::VideoFrameGrab
+        | NodeType::Unknown => vec![handle("text", "text")],
+    }
+}
+
+fn target_handle_options(node: &WorkflowNode) -> Vec<HandleOption> {
+    match node.node_type {
+        NodeType::NanoBanana | NodeType::GenerateVideo | NodeType::Generate3d => {
+            let mut handles = vec![handle("prompt", "prompt"), handle("image", "image")];
+            handles.extend(schema_handle_options(node));
+            dedupe_handles(handles)
+        }
+        NodeType::GenerateAudio | NodeType::LlmGenerate | NodeType::PromptConstructor => {
+            let mut handles = vec![handle("prompt", "prompt"), handle("text", "text")];
+            handles.extend(schema_handle_options(node));
+            dedupe_handles(handles)
+        }
+        NodeType::Output => vec![
+            handle("text", "text"),
+            handle("image", "image"),
+            handle("video", "video"),
+            handle("audio", "audio"),
+            handle("3d", "3D"),
+        ],
+        NodeType::OutputGallery => vec![handle("image", "image"), handle("video", "video")],
+        NodeType::ImageCompare => vec![handle("image-0", "image A"), handle("image-1", "image B")],
+        NodeType::VideoStitch => vec![handle("video-0", "video 1"), handle("video-1", "video 2")],
+        NodeType::EaseCurve => vec![handle("video", "video"), handle("easeCurve", "ease curve")],
+        NodeType::VideoTrim => vec![handle("video", "video")],
+        NodeType::VideoFrameGrab => vec![handle("video", "video")],
+        NodeType::Switch | NodeType::Router => vec![
+            handle("text", "text"),
+            handle("image", "image"),
+            handle("video", "video"),
+            handle("audio", "audio"),
+            handle("3d", "3D"),
+        ],
+        NodeType::ConditionalSwitch | NodeType::Array => vec![handle("text", "text")],
+        NodeType::Annotation => vec![handle("image", "image")],
+        NodeType::Prompt
+        | NodeType::ImageInput
+        | NodeType::AudioInput
+        | NodeType::VideoInput
+        | NodeType::SplitGrid
+        | NodeType::GlbViewer
+        | NodeType::Unknown => vec![handle("text", "text")],
+    }
+}
+
+fn schema_handle_options(node: &WorkflowNode) -> Vec<HandleOption> {
+    let mut options = Vec::new();
+    let Some(schema) = node
+        .data
+        .get("inputSchema")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return options;
+    };
+
+    let mut image_index = 0;
+    let mut text_index = 0;
+    let mut audio_index = 0;
+    for input in schema {
+        let Some(name) = input.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        match input.get("type").and_then(serde_json::Value::as_str) {
+            Some("image") => {
+                options.push(handle(format!("image-{image_index}"), name));
+                image_index += 1;
+            }
+            Some("text") => {
+                options.push(handle(format!("text-{text_index}"), name));
+                text_index += 1;
+            }
+            Some("audio") => {
+                options.push(handle(format!("audio-{audio_index}"), name));
+                audio_index += 1;
+            }
+            _ => {}
+        }
+    }
+    options
+}
+
+fn dedupe_handles(handles: Vec<HandleOption>) -> Vec<HandleOption> {
+    let mut deduped = Vec::new();
+    for handle in handles {
+        if !deduped
+            .iter()
+            .any(|existing: &HandleOption| existing.id == handle.id)
+        {
+            deduped.push(handle);
+        }
+    }
+    deduped
+}
+
+fn selected_handle_or_first(handles: &[HandleOption], selected: &str) -> String {
+    handles
+        .iter()
+        .find(|handle| handle.id == selected)
+        .or_else(|| handles.first())
+        .map(|handle| handle.id.clone())
+        .unwrap_or_default()
+}
+
+fn handle(id: impl Into<String>, label: impl Into<String>) -> HandleOption {
+    HandleOption {
+        id: id.into(),
+        label: label.into(),
+    }
+}
+
+fn optional_handle(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn optional_handle_ref(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
+fn edge_label(edge: &WorkflowEdge) -> String {
+    format!(
+        "{}:{} → {}:{}",
+        edge.source,
+        edge.source_handle.as_deref().unwrap_or(""),
+        edge.target,
+        edge.target_handle.as_deref().unwrap_or("")
+    )
 }
 
 fn mutate_selected_node(

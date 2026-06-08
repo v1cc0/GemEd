@@ -195,6 +195,43 @@ pub fn remove_edge(workflow: &mut WorkflowFile, edge_id: &str) -> EditResult<Wor
     Ok(workflow.edges.remove(index))
 }
 
+pub fn remove_edges_between_handles(
+    workflow: &mut WorkflowFile,
+    source: &str,
+    target: &str,
+    source_handle: Option<&str>,
+    target_handle: Option<&str>,
+) -> EditResult<Vec<WorkflowEdge>> {
+    ensure_node_exists(workflow, source)?;
+    ensure_node_exists(workflow, target)?;
+
+    let mut removed = Vec::new();
+    let mut index = 0;
+    while index < workflow.edges.len() {
+        if workflow.edges[index].source == source
+            && workflow.edges[index].target == target
+            && workflow.edges[index].source_handle.as_deref() == source_handle
+            && workflow.edges[index].target_handle.as_deref() == target_handle
+        {
+            removed.push(workflow.edges.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+
+    if removed.is_empty() {
+        return Err(WorkflowEditError::EdgeNotFound(format!(
+            "{}:{} -> {}:{}",
+            source,
+            source_handle.unwrap_or(""),
+            target,
+            target_handle.unwrap_or("")
+        )));
+    }
+
+    Ok(removed)
+}
+
 fn ensure_node_exists(workflow: &WorkflowFile, node_id: &str) -> EditResult<()> {
     workflow
         .nodes
@@ -349,6 +386,50 @@ mod tests {
         let removed = remove_edge(&mut workflow, "edge_a_b").unwrap();
         assert_eq!(removed.source, "a");
         assert!(workflow.edges.is_empty());
+    }
+
+    #[test]
+    fn connecting_with_handles_persists_handle_ids() {
+        let mut workflow = two_node_workflow();
+        let edge = add_edge_between(
+            &mut workflow,
+            "a",
+            "b",
+            Some("text".to_string()),
+            Some("prompt".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(edge.source_handle.as_deref(), Some("text"));
+        assert_eq!(edge.target_handle.as_deref(), Some("prompt"));
+    }
+
+    #[test]
+    fn removing_edges_between_handles_only_removes_exact_handle_pair() {
+        let mut workflow = two_node_workflow();
+        add_edge_between(
+            &mut workflow,
+            "a",
+            "b",
+            Some("text".to_string()),
+            Some("prompt".to_string()),
+        )
+        .unwrap();
+        add_edge_between(
+            &mut workflow,
+            "a",
+            "b",
+            Some("image".to_string()),
+            Some("image".to_string()),
+        )
+        .unwrap();
+
+        let removed =
+            remove_edges_between_handles(&mut workflow, "a", "b", Some("text"), Some("prompt"))
+                .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(workflow.edges.len(), 1);
+        assert_eq!(workflow.edges[0].source_handle.as_deref(), Some("image"));
     }
 
     #[test]
