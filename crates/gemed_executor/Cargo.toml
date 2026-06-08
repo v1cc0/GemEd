@@ -1,0 +1,15 @@
+[package]
+name = "gemed_executor"
+description = "Workflow graph traversal and simple execution foundations for GemEd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gemed_core = { path = "../gemed_core" }
+indexmap.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

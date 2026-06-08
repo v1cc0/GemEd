@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use gemed_core::{NodeStatus, WorkflowFile, WorkflowNode};
+use gemed_executor::{SimpleExecutionReport, execute_simple_workflow, execution_order};
 
 const APP_CSS: &str = r#"
 :root {
@@ -55,6 +56,11 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .type-list { display: flex; flex-direction: column; gap: .35rem; }
 .type-row { display: flex; justify-content: space-between; gap: .75rem; color: #b9c6df; font-size: .86rem; }
 .type-row code { color: #dbeafe; }
+.execution-log { display: flex; flex-direction: column; gap: .45rem; max-height: 14rem; overflow: auto; }
+.event { border-radius: .75rem; padding: .55rem .65rem; background: rgba(30, 41, 59, .72); border: 1px solid rgba(148, 163, 184, .12); }
+.event-head { display: flex; justify-content: space-between; gap: .6rem; align-items: center; margin-bottom: .25rem; }
+.event-title { color: #dbeafe; font-weight: 650; font-size: .82rem; }
+.event-message { color: #9fb0cf; font-size: .76rem; line-height: 1.35; }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
 "#;
@@ -69,13 +75,14 @@ pub fn App() -> Element {
     let workflow = use_signal(|| sample.read().clone());
     let json_text = use_signal(|| initial_json);
     let message = use_signal(|| Message::ok("Loaded built-in starter workflow."));
+    let execution_report = use_signal(|| None::<SimpleExecutionReport>);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
-            Header { workflow, json_text, message }
+            Header { workflow, json_text, message, execution_report }
             main { class: "main",
-                Sidebar { workflow, json_text, message }
+                Sidebar { workflow, json_text, message, execution_report }
                 WorkflowCanvas { workflow }
             }
         }
@@ -87,6 +94,7 @@ fn Header(
     mut workflow: Signal<WorkflowFile>,
     mut json_text: Signal<String>,
     mut message: Signal<Message>,
+    mut execution_report: Signal<Option<SimpleExecutionReport>>,
 ) -> Element {
     rsx! {
         header { class: "header",
@@ -103,6 +111,7 @@ fn Header(
                             Ok(json) => {
                                 workflow.set(next);
                                 json_text.set(json);
+                                execution_report.set(None);
                                 message.set(Message::ok("Started a blank workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize blank workflow: {err}"))),
@@ -118,6 +127,7 @@ fn Header(
                             Ok(json) => {
                                 workflow.set(next);
                                 json_text.set(json);
+                                execution_report.set(None);
                                 message.set(Message::ok("Reset to built-in starter workflow."));
                             }
                             Err(err) => message.set(Message::err(format!("Failed to serialize sample workflow: {err}"))),
@@ -136,11 +146,36 @@ fn Header(
                                 parsed.edges.len()
                             );
                             workflow.set(parsed);
+                            execution_report.set(None);
                             message.set(Message::ok(summary));
                         }
                         Err(err) => message.set(Message::err(format!("Workflow JSON rejected: {err}"))),
                     },
                     "Load JSON"
+                }
+
+                button {
+                    class: "action primary",
+                    onclick: move |_| {
+                        let current = workflow.read().clone();
+                        match execute_simple_workflow(&current) {
+                        Ok(result) => {
+                            let summary = result.report.summary();
+                            match result.workflow.to_pretty_json() {
+                                Ok(json) => json_text.set(json),
+                                Err(err) => message.set(Message::err(format!("Executed but failed to export JSON: {err}"))),
+                            }
+                            workflow.set(result.workflow);
+                            execution_report.set(Some(result.report));
+                            message.set(Message::ok(format!("Local executor finished: {summary}.")));
+                        }
+                        Err(err) => {
+                            execution_report.set(None);
+                            message.set(Message::err(format!("Local executor failed: {err}")));
+                        }
+                    }
+                    },
+                    "Run Local"
                 }
                 button {
                     class: "action",
@@ -163,10 +198,17 @@ fn Sidebar(
     workflow: Signal<WorkflowFile>,
     mut json_text: Signal<String>,
     message: Signal<Message>,
+    execution_report: Signal<Option<SimpleExecutionReport>>,
 ) -> Element {
     let wf = workflow.read();
     let counts = wf.node_type_counts();
     let msg = message.read();
+    let order_text = match execution_order(&wf) {
+        Ok(items) if items.is_empty() => "Order: no nodes".to_string(),
+        Ok(items) => format!("Order: {}", items.join(" → ")),
+        Err(err) => format!("Order blocked: {err}"),
+    };
+    let report = execution_report.read();
 
     rsx! {
         aside { class: "sidebar",
@@ -192,6 +234,27 @@ fn Sidebar(
                             }
                         }
                     }
+                }
+            }
+
+            section { class: "panel",
+                h2 { "Execution Spine" }
+                p { "{order_text}" }
+                if let Some(report) = report.as_ref() {
+                    p { "Last run: {report.summary()}" }
+                    div { class: "execution-log",
+                        for event in report.events.iter() {
+                            div { class: "event",
+                                div { class: "event-head",
+                                    span { class: "event-title", "{event.node_type}" }
+                                    span { class: "badge {event.status.as_str()}", "{event.status.as_str()}" }
+                                }
+                                div { class: "event-message", "{event.node_id}: {event.message}" }
+                            }
+                        }
+                    }
+                } else {
+                    p { "Run Local executes pure Rust prompt/array/output/control nodes and marks provider/media nodes as explicit skips." }
                 }
             }
             section { class: "panel",
