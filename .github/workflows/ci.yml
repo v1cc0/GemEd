@@ -36,6 +36,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libxdo-dev \
             xdotool \
             patchelf
 
@@ -153,7 +154,8 @@ jobs:
           echo "$!" > "$RUNNER_TEMP/gemed-dx-web-smoke.pid"
           for _ in {1..120}; do
             if curl -fsS -I http://127.0.0.1:4564/ >/dev/null \
-              && curl -fsS -I http://127.0.0.1:4564/vendor/model-viewer/4.3.1/model-viewer.min.js >/dev/null; then
+              && curl -fsS -I http://127.0.0.1:4564/vendor/model-viewer/4.3.1/model-viewer.min.js >/dev/null \
+              && grep -q "Build completed successfully" "$RUNNER_TEMP/gemed-dx-web-smoke.log"; then
               exit 0
             fi
             if ! kill -0 "$(cat "$RUNNER_TEMP/gemed-dx-web-smoke.pid")" 2>/dev/null; then
@@ -250,6 +252,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libxdo-dev \
             xdotool \
             patchelf
 

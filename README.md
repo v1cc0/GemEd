@@ -58,7 +58,7 @@ cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
 rustup target add wasm32-unknown-unknown
 ```
 
-Linux desktop builds need WebKitGTK development packages installed by the host distribution.
+Linux desktop builds need WebKitGTK development packages plus `libxdo-dev` installed by the host distribution.
 
 ## Run
 
