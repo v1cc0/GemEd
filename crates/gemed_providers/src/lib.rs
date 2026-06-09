@@ -1462,6 +1462,366 @@ fn extract_anthropic_message_text(value: &mut Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+#[cfg(feature = "http")]
+#[derive(Clone)]
+pub struct GeminiGenerateContentProvider {
+    id: ProviderId,
+    api_key: String,
+    endpoint_base: String,
+    default_model: String,
+    transport: Arc<dyn GeminiGenerateContentTransport>,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for GeminiGenerateContentProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiGenerateContentProvider")
+            .field("id", &self.id)
+            .field("api_key", &"<redacted>")
+            .field("endpoint_base", &self.endpoint_base)
+            .field("default_model", &self.default_model)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "http")]
+impl GeminiGenerateContentProvider {
+    pub const DEFAULT_ENDPOINT_BASE: &'static str =
+        "https://generativelanguage.googleapis.com/v1beta";
+    pub const DEFAULT_MODEL: &'static str = "gemini-3.5-flash";
+
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self::with_provider_id(ProviderId::Gemini, api_key)
+    }
+
+    pub fn with_provider_id(id: ProviderId, api_key: impl Into<String>) -> Self {
+        Self {
+            id,
+            api_key: api_key.into(),
+            endpoint_base: Self::DEFAULT_ENDPOINT_BASE.to_string(),
+            default_model: Self::DEFAULT_MODEL.to_string(),
+            transport: Arc::new(UreqGeminiGenerateContentTransport),
+        }
+    }
+
+    pub fn with_endpoint_base(mut self, endpoint_base: impl Into<String>) -> Self {
+        self.endpoint_base = normalize_gemini_generate_content_base_url(&endpoint_base.into());
+        self
+    }
+
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        if !model.trim().is_empty() {
+            self.default_model = model.trim().to_string();
+        }
+        self
+    }
+
+    pub fn with_transport(
+        mut self,
+        transport: impl GeminiGenerateContentTransport + 'static,
+    ) -> Self {
+        self.transport = Arc::new(transport);
+        self
+    }
+
+    pub fn from_config_with_secret<F>(
+        config: &ProviderConfig,
+        resolver: &F,
+    ) -> Result<Option<Self>, ProviderError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if !config.enabled
+            || !matches!(config.id, ProviderId::Gemini | ProviderId::Google)
+            || config.runtime_mode != ProviderRuntimeMode::DirectDesktop
+        {
+            return Ok(None);
+        }
+
+        let api_key = match &config.secret_source {
+            ProviderSecretSource::Environment { variable } => resolver(variable)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::MissingSecret(format!(
+                        "environment variable `{variable}` is not set"
+                    ))
+                })?,
+            ProviderSecretSource::DesktopKeychain { service, account } => {
+                return Err(ProviderError::MissingSecret(format!(
+                    "desktop keychain `{service}/{account}` resolution is not implemented yet"
+                )));
+            }
+            ProviderSecretSource::None | ProviderSecretSource::WebBackend { .. } => {
+                return Err(ProviderError::MissingSecret(
+                    "Gemini direct desktop provider requires an environment secret source"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let mut provider = Self::with_provider_id(config.id.clone(), api_key);
+        if let Some(base_url) = config.base_url.as_deref() {
+            provider = provider.with_endpoint_base(base_url);
+        }
+        if let Some(model) = config.default_model.as_deref() {
+            provider = provider.with_default_model(model);
+        }
+        Ok(Some(provider))
+    }
+}
+
+#[cfg(feature = "http")]
+impl ProviderBackend for GeminiGenerateContentProvider {
+    fn id(&self) -> ProviderId {
+        self.id.clone()
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ModelCatalog for GeminiGenerateContentProvider {
+    async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+        Ok(vec![ProviderModel {
+            provider: self.id.clone(),
+            model_id: self.default_model.clone(),
+            display_name: self.default_model.clone(),
+            capabilities: vec![ProviderCapability::Llm],
+            pricing: None,
+        }])
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl LlmProvider for GeminiGenerateContentProvider {
+    async fn generate_text(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        validate_prompt(&request.prompt)?;
+        let model = gemini_model_for_request(&request, &self.default_model).to_string();
+        let endpoint = gemini_generate_content_endpoint(&self.endpoint_base, &model);
+        let body = gemini_generate_content_request_body(&request);
+        let mut response = self.transport.send_json(&endpoint, &self.api_key, &body)?;
+        let text = extract_gemini_response_text(&mut response).ok_or_else(|| {
+            ProviderError::RequestFailed(
+                "Gemini response did not contain candidate text".to_string(),
+            )
+        })?;
+        Ok(LlmResponse {
+            text,
+            provider: self.id.clone(),
+            model,
+        })
+    }
+}
+
+#[cfg(feature = "http")]
+pub trait GeminiGenerateContentTransport: std::fmt::Debug {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError>;
+}
+
+#[cfg(feature = "http")]
+#[derive(Clone, Debug)]
+struct UreqGeminiGenerateContentTransport;
+
+#[cfg(feature = "http")]
+impl GeminiGenerateContentTransport for UreqGeminiGenerateContentTransport {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError> {
+        ureq::post(endpoint)
+            .header("x-goog-api-key", api_key)
+            .header("Accept", "application/json")
+            .send_json(body)
+            .map_err(gemini_transport_error)?
+            .body_mut()
+            .read_json()
+            .map_err(gemini_transport_error)
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ImageProvider for GeminiGenerateContentProvider {
+    async fn generate_image(&self, _request: ImageRequest) -> Result<ImageResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "image",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl VideoProvider for GeminiGenerateContentProvider {
+    async fn generate_video(&self, _request: VideoRequest) -> Result<VideoResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "video",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl AudioProvider for GeminiGenerateContentProvider {
+    async fn generate_audio(&self, _request: AudioRequest) -> Result<AudioResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "audio",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl Model3dProvider for GeminiGenerateContentProvider {
+    async fn generate_model3d(
+        &self,
+        _request: Model3dRequest,
+    ) -> Result<Model3dResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "3D",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+fn normalize_gemini_generate_content_base_url(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        GeminiGenerateContentProvider::DEFAULT_ENDPOINT_BASE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(feature = "http")]
+fn gemini_model_for_request<'a>(request: &'a LlmRequest, default_model: &'a str) -> &'a str {
+    if request.model.trim().is_empty() || request.model == "mock-llm" {
+        default_model
+    } else {
+        request.model.as_str()
+    }
+}
+
+#[cfg(feature = "http")]
+fn gemini_generate_content_endpoint(endpoint_base: &str, model: &str) -> String {
+    let base = normalize_gemini_generate_content_base_url(endpoint_base);
+    if base.contains("{model}") {
+        return base.replace("{model}", model.trim().trim_start_matches('/'));
+    }
+    if base.ends_with(":generateContent") {
+        return base;
+    }
+
+    let base = base.trim_end_matches("/models");
+    let model = model.trim().trim_start_matches('/');
+    let model_path = if model.starts_with("models/") || model.starts_with("publishers/") {
+        model.to_string()
+    } else {
+        format!("models/{model}")
+    };
+    format!("{base}/{model_path}:generateContent")
+}
+
+#[cfg(feature = "http")]
+fn gemini_generate_content_request_body(request: &LlmRequest) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "contents".to_string(),
+        serde_json::json!([{ "parts": [{ "text": request.prompt }] }]),
+    );
+
+    let mut generation_config = serde_json::Map::new();
+    if let Value::Object(parameters) = &request.parameters
+        && let Some(config) = parameters
+            .get("generationConfig")
+            .and_then(Value::as_object)
+    {
+        for (key, value) in config {
+            generation_config.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(temperature) = request.temperature {
+        generation_config.insert("temperature".to_string(), serde_json::json!(temperature));
+    }
+    if let Some(max_tokens) = request.max_tokens {
+        generation_config.insert("maxOutputTokens".to_string(), serde_json::json!(max_tokens));
+    }
+    if !generation_config.is_empty() {
+        body.insert(
+            "generationConfig".to_string(),
+            Value::Object(generation_config),
+        );
+    }
+
+    if let Value::Object(parameters) = &request.parameters {
+        for (key, value) in parameters {
+            if key == "generationConfig" {
+                continue;
+            }
+            body.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    Value::Object(body)
+}
+
+#[cfg(feature = "http")]
+fn gemini_transport_error(error: ureq::Error) -> ProviderError {
+    match error {
+        ureq::Error::StatusCode(status) => {
+            ProviderError::RequestFailed(format!("Gemini API returned HTTP {status}"))
+        }
+        other => ProviderError::RequestFailed(format!("Gemini API request failed: {other}")),
+    }
+}
+
+#[cfg(feature = "http")]
+fn extract_gemini_response_text(value: &mut Value) -> Option<String> {
+    if let Some(text) = value
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    let mut parts = Vec::new();
+    let candidates = value.get_mut("candidates")?.as_array_mut()?;
+    for candidate in candidates {
+        let Some(candidate_parts) = candidate
+            .get_mut("content")
+            .and_then(|content| content.get_mut("parts"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for part in candidate_parts {
+            let Some(text) = part
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            else {
+                continue;
+            };
+            parts.push(text.to_string());
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn validate_prompt(prompt: &str) -> Result<(), ProviderError> {
     if prompt.trim().is_empty() {
         return Err(ProviderError::InvalidRequest(
@@ -2040,6 +2400,214 @@ mod tests {
 
         assert!(
             matches!(err, ProviderError::RequestFailed(message) if message == "fake anthropic network failure")
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_generate_content_body_maps_llm_request() {
+        let body = gemini_generate_content_request_body(&LlmRequest {
+            provider: ProviderId::Gemini,
+            model: "gemini-test".to_string(),
+            prompt: "hello".to_string(),
+            input_images: Vec::new(),
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+            parameters: serde_json::json!({
+                "generationConfig": {
+                    "topP": 0.9
+                },
+                "safetySettings": []
+            }),
+        });
+
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "hello");
+        assert_eq!(body["generationConfig"]["temperature"], 0.2);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 64);
+        assert_eq!(body["generationConfig"]["topP"], 0.9);
+        assert_eq!(body["safetySettings"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_endpoint_and_default_model_are_predictable() {
+        assert_eq!(
+            gemini_model_for_request(
+                &LlmRequest {
+                    provider: ProviderId::Gemini,
+                    model: "mock-llm".to_string(),
+                    prompt: "hello".to_string(),
+                    input_images: Vec::new(),
+                    temperature: None,
+                    max_tokens: None,
+                    parameters: Value::Null,
+                },
+                "gemini-default",
+            ),
+            "gemini-default"
+        );
+        assert_eq!(
+            gemini_generate_content_endpoint("https://proxy.example.test/v1beta", "gemini-test"),
+            "https://proxy.example.test/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(
+            gemini_generate_content_endpoint(
+                "https://proxy.example.test/v1beta/{model}:generateContent",
+                "models/gemini-test",
+            ),
+            "https://proxy.example.test/v1beta/models/gemini-test:generateContent"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_response_text_extracts_candidate_parts() {
+        let mut response = serde_json::json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "first" },
+                            { "text": "second" }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_gemini_response_text(&mut response),
+            Some("first\nsecond".to_string())
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_provider_from_config_resolves_env_secret_without_leaking_it() {
+        let config = ProviderConfig::direct_desktop_env(
+            ProviderId::Gemini,
+            "GEMINI_API_KEY",
+            Some("gemini-test".to_string()),
+        );
+
+        let provider = GeminiGenerateContentProvider::from_config_with_secret(&config, &|name| {
+            (name == "GEMINI_API_KEY").then(|| "gemini-test-secret".to_string())
+        })
+        .expect("config resolves")
+        .expect("provider created");
+
+        assert_eq!(provider.default_model, "gemini-test");
+        assert_eq!(provider.id(), ProviderId::Gemini);
+        assert!(!format!("{provider:?}").contains("gemini-test-secret"));
+        assert_eq!(
+            GeminiGenerateContentProvider::from_config_with_secret(&config, &|_| None::<String>)
+                .expect_err("missing secret rejected")
+                .to_string(),
+            "provider secret is missing: environment variable `GEMINI_API_KEY` is not set"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_provider_uses_transport_and_maps_response() {
+        type CapturedGeminiRequest = Option<(String, String, Value)>;
+
+        #[derive(Debug)]
+        struct FakeTransport {
+            response: Mutex<Value>,
+            captured: Arc<Mutex<CapturedGeminiRequest>>,
+        }
+
+        impl GeminiGenerateContentTransport for FakeTransport {
+            fn send_json(
+                &self,
+                endpoint: &str,
+                api_key: &str,
+                body: &Value,
+            ) -> Result<Value, ProviderError> {
+                *self.captured.lock().unwrap() =
+                    Some((endpoint.to_string(), api_key.to_string(), body.clone()));
+                Ok(self.response.lock().unwrap().clone())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let transport = FakeTransport {
+            response: Mutex::new(serde_json::json!({
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                { "text": "hello from gemini fake transport" }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            captured: Arc::clone(&captured),
+        };
+
+        let provider = GeminiGenerateContentProvider::new("gemini-test-key")
+            .with_endpoint_base("https://proxy.example.test/v1beta")
+            .with_transport(transport);
+        let response = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::Gemini,
+            model: "gemini-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: Some(12),
+            parameters: Value::Null,
+        }))
+        .expect("fake transport response maps");
+
+        assert_eq!(response.text, "hello from gemini fake transport");
+        assert_eq!(response.provider, ProviderId::Gemini);
+        assert_eq!(response.model, "gemini-test");
+        let (endpoint, api_key, body) = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            endpoint,
+            "https://proxy.example.test/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(api_key, "gemini-test-key");
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "say hello");
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 12);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn gemini_provider_reports_transport_errors() {
+        #[derive(Debug)]
+        struct FailingTransport;
+
+        impl GeminiGenerateContentTransport for FailingTransport {
+            fn send_json(
+                &self,
+                _endpoint: &str,
+                _api_key: &str,
+                _body: &Value,
+            ) -> Result<Value, ProviderError> {
+                Err(ProviderError::RequestFailed(
+                    "fake gemini network failure".to_string(),
+                ))
+            }
+        }
+
+        let provider =
+            GeminiGenerateContentProvider::new("gemini-test-key").with_transport(FailingTransport);
+        let err = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::Gemini,
+            model: "gemini-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            parameters: Value::Null,
+        }))
+        .expect_err("fake transport failure propagates");
+
+        assert!(
+            matches!(err, ProviderError::RequestFailed(message) if message == "fake gemini network failure")
         );
     }
 }

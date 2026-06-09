@@ -16,7 +16,9 @@ use gemed_executor::{
 };
 use gemed_media::{MediaKind, MediaPreview, media_previews_for_node, workflow_media_summary};
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
-use gemed_providers::{AnthropicMessagesProvider, OpenAiResponsesProvider};
+use gemed_providers::{
+    AnthropicMessagesProvider, GeminiGenerateContentProvider, OpenAiResponsesProvider,
+};
 use gemed_providers::{
     ProviderCapability, ProviderConfig, ProviderConfigSet, ProviderId, ProviderRegistry,
     ProviderRuntimeMode, ProviderSecretSource,
@@ -3033,6 +3035,13 @@ fn register_platform_provider_backends(
             continue;
         }
         match provider.id {
+            ProviderId::Gemini | ProviderId::Google => register_provider_backend(
+                registry,
+                GeminiGenerateContentProvider::from_config_with_secret(
+                    provider,
+                    &provider_secret_env_value,
+                ),
+            )?,
             ProviderId::OpenAi => register_provider_backend(
                 registry,
                 OpenAiResponsesProvider::from_config_with_secret(
