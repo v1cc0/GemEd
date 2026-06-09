@@ -461,6 +461,7 @@ pub mod desktop {
                 Ok(())
             }
             Value::Object(map) => {
+                externalize_known_media_fields(map, media_dir, media_files)?;
                 for item in map.values_mut() {
                     externalize_media_value(item, media_dir, media_files)?;
                 }
@@ -468,6 +469,65 @@ pub mod desktop {
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
         }
+    }
+
+    fn externalize_known_media_fields(
+        map: &mut serde_json::Map<String, Value>,
+        media_dir: &Path,
+        media_files: &mut Vec<String>,
+    ) -> Result<()> {
+        for (inline_key, ref_key) in SINGLE_MEDIA_FIELD_REFS {
+            let Some(data_url) = map
+                .get(*inline_key)
+                .and_then(Value::as_str)
+                .and_then(DataUrl::parse)
+            else {
+                continue;
+            };
+            let reference = write_media_reference(media_dir, &data_url, media_files)?;
+            map.insert((*inline_key).to_string(), Value::Null);
+            map.insert((*ref_key).to_string(), Value::String(reference));
+        }
+
+        for (inline_key, ref_key) in ARRAY_MEDIA_FIELD_REFS {
+            let mut refs = map
+                .get(*ref_key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let Some(Value::Array(items)) = map.get_mut(*inline_key) else {
+                continue;
+            };
+            if refs.len() < items.len() {
+                refs.resize(items.len(), Value::Null);
+            }
+            let mut changed = false;
+            for (index, item) in items.iter_mut().enumerate() {
+                let Some(data_url) = item.as_str().and_then(DataUrl::parse) else {
+                    continue;
+                };
+                let reference = write_media_reference(media_dir, &data_url, media_files)?;
+                refs[index] = Value::String(reference);
+                *item = Value::String(String::new());
+                changed = true;
+            }
+            if changed {
+                map.insert((*ref_key).to_string(), Value::Array(refs));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_media_reference(
+        media_dir: &Path,
+        data_url: &DataUrl,
+        media_files: &mut Vec<String>,
+    ) -> Result<String> {
+        let filename = write_data_url_media(media_dir, data_url)?;
+        let relative = format!("{PROJECT_MEDIA_DIR}/{filename}");
+        media_files.push(relative.clone());
+        Ok(format!("{PROJECT_MEDIA_URL_PREFIX}{relative}"))
     }
 
     fn hydrate_workflow_media_json(root: &Path, json: &str) -> Result<String> {
@@ -485,17 +545,10 @@ pub mod desktop {
     fn hydrate_media_value(root: &Path, value: &mut Value) -> Result<()> {
         match value {
             Value::String(text) => {
-                let Some(relative) = text.strip_prefix(PROJECT_MEDIA_URL_PREFIX) else {
+                let Some(data_url) = media_reference_to_data_url(root, text)? else {
                     return Ok(());
                 };
-                let path = safe_project_child(root, relative)?;
-                let bytes = std::fs::read(&path).map_err(|source| StorageError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-                let mime = mime_from_path(&path);
-                let encoded = general_purpose::STANDARD.encode(bytes);
-                *text = format!("data:{mime};base64,{encoded}");
+                *text = data_url;
                 Ok(())
             }
             Value::Array(items) => {
@@ -505,6 +558,7 @@ pub mod desktop {
                 Ok(())
             }
             Value::Object(map) => {
+                hydrate_known_media_fields(root, map)?;
                 for item in map.values_mut() {
                     hydrate_media_value(root, item)?;
                 }
@@ -513,6 +567,98 @@ pub mod desktop {
             Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
         }
     }
+
+    fn hydrate_known_media_fields(
+        root: &Path,
+        map: &mut serde_json::Map<String, Value>,
+    ) -> Result<()> {
+        for (inline_key, ref_key) in SINGLE_MEDIA_FIELD_REFS {
+            if !is_empty_media_value(map.get(*inline_key)) {
+                continue;
+            }
+            let Some(reference) = map.get(*ref_key).and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(data_url) = media_reference_to_data_url(root, reference)? else {
+                continue;
+            };
+            map.insert((*inline_key).to_string(), Value::String(data_url));
+        }
+
+        for (inline_key, ref_key) in ARRAY_MEDIA_FIELD_REFS {
+            let Some(refs) = map.get(*ref_key).and_then(Value::as_array).cloned() else {
+                continue;
+            };
+            let mut items = map
+                .get(*inline_key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if items.len() < refs.len() {
+                items.resize(refs.len(), Value::String(String::new()));
+            }
+            let mut changed = false;
+            for (index, reference) in refs.iter().enumerate() {
+                if !is_empty_media_value(items.get(index)) {
+                    continue;
+                }
+                let Some(reference) = reference.as_str() else {
+                    continue;
+                };
+                let Some(data_url) = media_reference_to_data_url(root, reference)? else {
+                    continue;
+                };
+                items[index] = Value::String(data_url);
+                changed = true;
+            }
+            if changed {
+                map.insert((*inline_key).to_string(), Value::Array(items));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_empty_media_value(value: Option<&Value>) -> bool {
+        match value {
+            None | Some(Value::Null) => true,
+            Some(Value::String(text)) => text.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn media_reference_to_data_url(root: &Path, reference: &str) -> Result<Option<String>> {
+        let Some(relative) = reference.strip_prefix(PROJECT_MEDIA_URL_PREFIX) else {
+            return Ok(None);
+        };
+        let path = safe_project_child(root, relative)?;
+        let bytes = std::fs::read(&path).map_err(|source| StorageError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let mime = mime_from_path(&path);
+        let encoded = general_purpose::STANDARD.encode(bytes);
+        Ok(Some(format!("data:{mime};base64,{encoded}")))
+    }
+
+    const SINGLE_MEDIA_FIELD_REFS: &[(&str, &str)] = &[
+        ("image", "imageRef"),
+        ("audioFile", "audioFileRef"),
+        ("video", "videoRef"),
+        ("sourceImage", "sourceImageRef"),
+        ("outputImage", "outputImageRef"),
+        ("outputVideo", "outputVideoRef"),
+        ("outputAudio", "outputAudioRef"),
+        ("imageA", "imageARef"),
+        ("imageB", "imageBRef"),
+        ("capturedImage", "capturedImageRef"),
+    ];
+
+    const ARRAY_MEDIA_FIELD_REFS: &[(&str, &str)] = &[
+        ("inputImages", "inputImageRefs"),
+        ("images", "imageRefs"),
+        ("videos", "videoRefs"),
+    ];
 
     struct DataUrl {
         mime: String,
@@ -941,6 +1087,21 @@ mod tests {
         let saved_json = std::fs::read_to_string(root.join(PROJECT_WORKFLOW_FILE)).unwrap();
         assert!(!saved_json.contains("data:image/png"));
         assert!(saved_json.contains(PROJECT_MEDIA_URL_PREFIX));
+        let saved_value: serde_json::Value = serde_json::from_str(&saved_json).unwrap();
+        let saved_data = &saved_value["nodes"][0]["data"];
+        assert_eq!(saved_data["image"], serde_json::Value::Null);
+        assert!(
+            saved_data["imageRef"]
+                .as_str()
+                .unwrap()
+                .starts_with(PROJECT_MEDIA_URL_PREFIX)
+        );
+        assert!(
+            saved_data["nested"]["duplicate"]
+                .as_str()
+                .unwrap()
+                .starts_with(PROJECT_MEDIA_URL_PREFIX)
+        );
 
         let loaded = project.load().expect("load project media");
         assert_eq!(loaded.workflow.nodes[0].data["image"], media);
@@ -978,6 +1139,52 @@ mod tests {
         assert!(!stale_file.exists());
         assert!(root.join(&second.manifest.media_files[0]).is_file());
         assert!(untracked_file.is_file());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_externalizes_and_hydrates_known_media_arrays() {
+        let media = "data:image/png;base64,aGVsbG8=";
+        let mut workflow = WorkflowFile::blank();
+        workflow.name = "media array bundle".to_string();
+        workflow.nodes.push(WorkflowNode::new(
+            "generate",
+            NodeType::NanoBanana,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "inputImages": [media, "https://example.invalid/image.png"],
+                "inputImageRefs": ["", ""]
+            }),
+        ));
+        let root = unique_temp_dir("gemed-project-media-array-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let snapshot = project.save(&workflow).expect("save project media array");
+
+        assert_eq!(snapshot.manifest.media_files.len(), 1);
+        let saved_json = std::fs::read_to_string(root.join(PROJECT_WORKFLOW_FILE)).unwrap();
+        let saved_value: serde_json::Value = serde_json::from_str(&saved_json).unwrap();
+        let saved_data = &saved_value["nodes"][0]["data"];
+        assert_eq!(saved_data["inputImages"][0], "");
+        assert_eq!(
+            saved_data["inputImages"][1],
+            "https://example.invalid/image.png"
+        );
+        assert!(
+            saved_data["inputImageRefs"][0]
+                .as_str()
+                .unwrap()
+                .starts_with(PROJECT_MEDIA_URL_PREFIX)
+        );
+
+        let loaded = project.load().expect("load project media array");
+        assert_eq!(loaded.workflow.nodes[0].data["inputImages"][0], media);
+        assert_eq!(
+            loaded.workflow.nodes[0].data["inputImages"][1],
+            "https://example.invalid/image.png"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
