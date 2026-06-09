@@ -9,11 +9,11 @@ Implemented now:
 - Rust workspace with `gemed_core`, `gemed_executor`, `gemed_media`, `gemed_providers`, `gemed_storage`, and `gemed_app` crates
 - Dioxus app targeting web and desktop from one codebase
 - Workflow v1 schema for nodes, edges, groups, node statuses, and edge style
-- Representative legacy workflow JSON fixtures with import/roundtrip coverage in `gemed_core`
+- Representative legacy and media-preview workflow JSON fixtures with import/roundtrip coverage in `gemed_core`
 - Typed node-handle metadata in `gemed_core` for canvas connection UI
 - Graph traversal, connected-input resolution, and topological execution ordering
 - Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, and control nodes
-- Built-in sample workflow
+- Built-in starter and Media Sample workflows
 - JSON editor that loads and validates workflow JSON
 - SVG/HTML canvas rendering nodes and edges
 - Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, drag-to-move group headers, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
@@ -25,6 +25,7 @@ Implemented now:
 - Fake-transport coverage for the opt-in OpenAI LLM backend so request mapping, authorization header construction, response parsing, and transport errors are tested without real API calls
 - Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar
 - Node-card media preview foundation that detects common inline/reference media fields and renders image/audio/video previews when the URI is directly renderable, while flagging GLB/project-reference adapter gaps honestly
+- Header action to load the built-in Media Sample and exercise the JSON import/export → node-card preview path without external provider calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)

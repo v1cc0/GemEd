@@ -262,6 +262,25 @@ fn Header(
                     "Sample"
                 }
                 button {
+                    class: "action",
+                    onclick: move |_| {
+                        let next = WorkflowFile::media_preview_example();
+                        match next.to_pretty_json() {
+                            Ok(json) => {
+                                workflow.set(next);
+                                json_text.set(json);
+                                execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
+                                connection_draft.set(None);
+                                message.set(Message::ok("Loaded built-in media preview sample."));
+                            }
+                            Err(err) => message.set(Message::err(format!("Failed to serialize media sample workflow: {err}"))),
+                        }
+                    },
+                    "Media Sample"
+                }
+                button {
                     class: "action primary",
                     onclick: move |_| match WorkflowFile::from_json_str(&json_text.read()) {
                         Ok(parsed) => {

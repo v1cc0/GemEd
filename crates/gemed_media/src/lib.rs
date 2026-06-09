@@ -789,4 +789,45 @@ mod tests {
         assert_eq!(previews[0].kind, MediaKind::Model3d);
         assert_eq!(previews[0].label, "3D model");
     }
+
+    #[test]
+    fn built_in_media_sample_exercises_renderable_and_project_reference_previews() {
+        let workflow = WorkflowFile::media_preview_example();
+        let previews = workflow
+            .nodes
+            .iter()
+            .flat_map(media_previews_for_node)
+            .collect::<Vec<_>>();
+
+        assert_eq!(previews.len(), 7);
+        assert_eq!(
+            previews
+                .iter()
+                .filter(|preview| preview.is_renderable_uri())
+                .count(),
+            5
+        );
+        assert_eq!(
+            previews
+                .iter()
+                .filter(|preview| preview.uri.starts_with("gemed-media://"))
+                .count(),
+            2
+        );
+        assert!(
+            previews
+                .iter()
+                .any(|preview| preview.kind == MediaKind::Audio)
+        );
+        assert!(
+            previews
+                .iter()
+                .any(|preview| preview.kind == MediaKind::Video)
+        );
+        assert!(
+            previews
+                .iter()
+                .any(|preview| preview.kind == MediaKind::Model3d)
+        );
+    }
 }

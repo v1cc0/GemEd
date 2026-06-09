@@ -1,4 +1,5 @@
 use gemed_core::{EdgeStyle, NodeType, WorkflowFile};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -142,6 +143,74 @@ fn legacy_control_fixture_preserves_control_edges_and_unknown_node_payload() {
 }
 
 #[test]
+fn media_preview_sample_fixture_covers_renderable_and_project_media_contracts() {
+    let workflow = load_fixture("media-preview-sample.json");
+
+    assert_eq!(workflow.id.as_deref(), Some("wf_media_preview_sample"));
+    assert_eq!(workflow.nodes.len(), 5);
+    assert_eq!(workflow.edges.len(), 3);
+
+    let image = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "fixture-image")
+        .expect("image fixture exists");
+    assert_eq!(image.node_type, NodeType::ImageInput);
+    assert!(
+        image
+            .data
+            .get("image")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("data:image/svg+xml;base64,"))
+    );
+
+    let audio = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "fixture-audio")
+        .expect("audio fixture exists");
+    assert_eq!(audio.node_type, NodeType::AudioInput);
+    assert!(
+        audio
+            .data
+            .get("audioFile")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("data:audio/wav;base64,"))
+    );
+
+    let video = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "fixture-video")
+        .expect("video fixture exists");
+    assert_eq!(video.node_type, NodeType::VideoInput);
+    assert_eq!(
+        video.data.get("video").and_then(Value::as_str),
+        Some("https://example.invalid/media-preview.mp4")
+    );
+
+    let gallery = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "fixture-gallery")
+        .expect("gallery fixture exists");
+    assert_eq!(
+        gallery.data["imageRefs"][0],
+        "gemed-media://media/external-preview.png"
+    );
+
+    let glb = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "fixture-glb")
+        .expect("glb fixture exists");
+    assert_eq!(
+        glb.data.get("glbUrl").and_then(Value::as_str),
+        Some("gemed-media://media/fixture-model.glb")
+    );
+}
+
+#[test]
 fn fixture_manifest_covers_expected_legacy_shapes() {
     let fixtures = workflow_fixture_paths();
     let names = fixtures
@@ -151,6 +220,7 @@ fn fixture_manifest_covers_expected_legacy_shapes() {
 
     assert!(names.contains(&"legacy-media-provider.json"));
     assert!(names.contains(&"legacy-control-routing.json"));
+    assert!(names.contains(&"media-preview-sample.json"));
 }
 
 fn workflow_fixture_paths() -> Vec<PathBuf> {

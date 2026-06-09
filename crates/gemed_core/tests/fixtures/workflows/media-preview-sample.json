@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "id": "wf_media_preview_sample",
+  "name": "Media Preview Sample Fixture",
+  "edgeStyle": "curved",
+  "nodes": [
+    {
+      "id": "fixture-image",
+      "type": "imageInput",
+      "position": { "x": 80, "y": 120 },
+      "data": {
+        "label": "Fixture Image",
+        "status": "complete",
+        "image": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgMTAwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iIzBmMTcyYSIvPjxwYXRoIGQ9Ik04MCAxMiAxMzIgNDIgMTEyIDg4SDQ4TDI4IDQyWiIgZmlsbD0iIzYwYTVmYSIvPjxwYXRoIGQ9Ik04MCAxMiAxMDIgNDJINThaIiBmaWxsPSIjYmZkYmZlIi8+PHBhdGggZD0iTTU4IDQyaDQ0TDgwIDg4WiIgZmlsbD0iIzI1NjNlYiIvPjx0ZXh0IHg9IjgwIiB5PSI5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNlNWVjZmYiPkdlbUVkPC90ZXh0Pjwvc3ZnPg==",
+        "filename": "fixture-preview.svg",
+        "dimensions": { "width": 160, "height": 100 }
+      }
+    },
+    {
+      "id": "fixture-audio",
+      "type": "audioInput",
+      "position": { "x": 80, "y": 330 },
+      "data": {
+        "label": "Fixture Audio",
+        "status": "complete",
+        "audioFile": "data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+        "filename": "fixture-preview.wav",
+        "duration": 0.05,
+        "format": "audio/wav"
+      }
+    },
+    {
+      "id": "fixture-video",
+      "type": "videoInput",
+      "position": { "x": 430, "y": 120 },
+      "data": {
+        "label": "Fixture Video URL",
+        "status": "complete",
+        "video": "https://example.invalid/media-preview.mp4",
+        "filename": "fixture-preview.mp4",
+        "duration": 0.12,
+        "format": "video/mp4"
+      }
+    },
+    {
+      "id": "fixture-gallery",
+      "type": "outputGallery",
+      "position": { "x": 780, "y": 150 },
+      "data": {
+        "label": "Fixture Gallery",
+        "status": "complete",
+        "images": ["", "/sample-images/watch.jpg"],
+        "imageRefs": ["gemed-media://media/external-preview.png"],
+        "videos": ["https://example.invalid/gallery-preview.webm"]
+      }
+    },
+    {
+      "id": "fixture-glb",
+      "type": "glbViewer",
+      "position": { "x": 780, "y": 410 },
+      "data": {
+        "label": "Fixture GLB Reference",
+        "status": "idle",
+        "glbUrl": "gemed-media://media/fixture-model.glb",
+        "filename": "fixture-model.glb"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-fixture-image-gallery",
+      "source": "fixture-image",
+      "target": "fixture-gallery",
+      "sourceHandle": "image",
+      "targetHandle": "image",
+      "data": {}
+    },
+    {
+      "id": "edge-fixture-video-gallery",
+      "source": "fixture-video",
+      "target": "fixture-gallery",
+      "sourceHandle": "video",
+      "targetHandle": "video",
+      "data": {}
+    },
+    {
+      "id": "edge-fixture-audio-gallery",
+      "source": "fixture-audio",
+      "target": "fixture-gallery",
+      "sourceHandle": "audio",
+      "targetHandle": "audio",
+      "data": {}
+    }
+  ]
+}
