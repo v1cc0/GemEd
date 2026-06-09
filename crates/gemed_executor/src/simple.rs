@@ -8,21 +8,17 @@ use gemed_media::{
     plan_glb_viewer, plan_video_frame_grab, split_inline_image_grid,
 };
 use gemed_providers::{
-    AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
-    ProviderRegistry, VideoRequest,
+    AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderCancellationToken,
+    ProviderError, ProviderId, ProviderRegistry, VideoRequest,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionControl {
-    cancelled: Arc<AtomicBool>,
+    cancellation: ProviderCancellationToken,
 }
 
 impl ExecutionControl {
@@ -31,15 +27,19 @@ impl ExecutionControl {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancellation.cancel();
     }
 
     pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::SeqCst);
+        self.cancellation.reset();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancellation.is_cancelled()
+    }
+
+    pub fn provider_cancellation(&self) -> &ProviderCancellationToken {
+        &self.cancellation
     }
 }
 
@@ -345,7 +345,7 @@ async fn execute_workflow_inner(
         }
         let inputs = connected_inputs(&workflow, &node_id);
         let node_snapshot = workflow.nodes[index].clone();
-        let outcome = execute_node(&node_snapshot, &inputs, providers).await;
+        let outcome = execute_node(&node_snapshot, &inputs, providers, control).await;
         apply_workflow_updates(&mut workflow, index, outcome.updates);
         set_status(&mut workflow.nodes[index], outcome.status);
         if let Some(error) = outcome.error.as_deref() {
@@ -447,6 +447,7 @@ async fn execute_node(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     match node.node_type {
         NodeType::ImageInput | NodeType::AudioInput | NodeType::VideoInput => {
@@ -464,11 +465,11 @@ async fn execute_node(
             "Control node evaluated as a pass-through/gate.",
             IndexMap::new(),
         ),
-        NodeType::NanoBanana => execute_image_generation(node, inputs, providers).await,
-        NodeType::GenerateVideo => execute_video_generation(node, inputs, providers).await,
-        NodeType::Generate3d => execute_3d_generation(node, inputs, providers).await,
-        NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers).await,
-        NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers).await,
+        NodeType::NanoBanana => execute_image_generation(node, inputs, providers, control).await,
+        NodeType::GenerateVideo => execute_video_generation(node, inputs, providers, control).await,
+        NodeType::Generate3d => execute_3d_generation(node, inputs, providers, control).await,
+        NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers, control).await,
+        NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers, control).await,
         NodeType::VideoFrameGrab => execute_video_frame_grab(node, inputs),
         NodeType::GlbViewer => execute_glb_viewer(node, inputs),
         NodeType::VideoStitch | NodeType::EaseCurve | NodeType::VideoTrim => NodeOutcome::skipped(
@@ -482,6 +483,7 @@ async fn execute_llm_generation(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     let provider_id = llm_provider_id(node);
     let Some(provider) = providers.get(&provider_id) else {
@@ -500,7 +502,10 @@ async fn execute_llm_generation(
         parameters: parameters_for_node(node),
     };
 
-    match provider.generate_text(request).await {
+    match provider
+        .generate_text_with_cancellation(request, control.provider_cancellation())
+        .await
+    {
         Ok(response) => {
             let mut updates = provider_common_updates(response.provider, response.model);
             updates.insert(
@@ -518,6 +523,7 @@ async fn execute_image_generation(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     let provider_id = selected_provider_id(node, ProviderId::Gemini);
     let Some(provider) = providers.get(&provider_id) else {
@@ -534,7 +540,10 @@ async fn execute_image_generation(
         parameters: parameters_for_node(node),
     };
 
-    match provider.generate_image(request).await {
+    match provider
+        .generate_image_with_cancellation(request, control.provider_cancellation())
+        .await
+    {
         Ok(response) => {
             let mut updates = provider_common_updates(response.provider, response.model);
             updates.insert("inputPrompt".to_string(), json!(prompt));
@@ -550,6 +559,7 @@ async fn execute_video_generation(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     let provider_id = selected_provider_id(node, ProviderId::Replicate);
     let Some(provider) = providers.get(&provider_id) else {
@@ -566,7 +576,10 @@ async fn execute_video_generation(
         parameters: parameters_for_node(node),
     };
 
-    match provider.generate_video(request).await {
+    match provider
+        .generate_video_with_cancellation(request, control.provider_cancellation())
+        .await
+    {
         Ok(response) => {
             let mut updates = provider_common_updates(response.provider, response.model);
             updates.insert("inputPrompt".to_string(), json!(prompt));
@@ -582,6 +595,7 @@ async fn execute_audio_generation(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     let provider_id = selected_provider_id(node, ProviderId::Replicate);
     let Some(provider) = providers.get(&provider_id) else {
@@ -596,7 +610,10 @@ async fn execute_audio_generation(
         parameters: parameters_for_node(node),
     };
 
-    match provider.generate_audio(request).await {
+    match provider
+        .generate_audio_with_cancellation(request, control.provider_cancellation())
+        .await
+    {
         Ok(response) => {
             let mut updates = provider_common_updates(response.provider, response.model);
             updates.insert("inputPrompt".to_string(), json!(prompt));
@@ -611,6 +628,7 @@ async fn execute_3d_generation(
     node: &WorkflowNode,
     inputs: &ConnectedInputs,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> NodeOutcome {
     let provider_id = selected_provider_id(node, ProviderId::Replicate);
     let Some(provider) = providers.get(&provider_id) else {
@@ -627,7 +645,10 @@ async fn execute_3d_generation(
         parameters: parameters_for_node(node),
     };
 
-    match provider.generate_model3d(request).await {
+    match provider
+        .generate_model3d_with_cancellation(request, control.provider_cancellation())
+        .await
+    {
         Ok(response) => {
             let mut updates = provider_common_updates(response.provider, response.model);
             updates.insert("inputPrompt".to_string(), json!(prompt));
@@ -1193,8 +1214,8 @@ mod tests {
     };
     use gemed_providers::{
         AudioProvider, AudioResponse, ImageProvider, ImageResponse, LlmProvider, LlmResponse,
-        Model3dProvider, Model3dResponse, ModelCatalog, ProviderBackend, ProviderModel,
-        VideoProvider, VideoResponse,
+        Model3dProvider, Model3dResponse, ModelCatalog, ProviderBackend, ProviderCancellationToken,
+        ProviderModel, VideoProvider, VideoResponse,
     };
     use indexmap::IndexMap;
 
@@ -1467,6 +1488,65 @@ mod tests {
                 ("output", NodeStatusWire::Skipped),
             ]
         );
+    }
+
+    #[test]
+    fn cancellation_token_reaches_provider_boundary() {
+        let workflow = WorkflowFile {
+            name: "cancel inside provider".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "llm",
+                    NodeType::LlmGenerate,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"provider":"mock","model":"cancel-aware"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::new("e1", "llm", "output")],
+            ..WorkflowFile::blank()
+        };
+        let control = ExecutionControl::new();
+        let providers = ProviderRegistry::with_provider(CancelAwareLlmProvider);
+
+        let result = execute_workflow_with_providers_with_control(&workflow, &providers, &control)
+            .expect("provider cancellation is reported as node error");
+
+        let llm = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "llm")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+
+        assert!(control.is_cancelled());
+        assert_eq!(
+            llm.data.get("status").and_then(Value::as_str),
+            Some("error")
+        );
+        assert!(
+            llm.data
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("provider request was cancelled"))
+        );
+        assert_eq!(
+            output.data.get("status").and_then(Value::as_str),
+            Some("skipped")
+        );
+        assert_eq!(result.report.error_count(), 1);
+        assert_eq!(result.report.skipped_count(), 1);
     }
 
     #[test]
@@ -2339,6 +2419,90 @@ mod tests {
         ) -> Result<Model3dResponse, ProviderError> {
             Err(ProviderError::UnsupportedCapability(
                 "cancel-test".to_string(),
+                "3d",
+            ))
+        }
+    }
+
+    struct CancelAwareLlmProvider;
+
+    impl ProviderBackend for CancelAwareLlmProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Mock
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl ModelCatalog for CancelAwareLlmProvider {
+        async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl LlmProvider for CancelAwareLlmProvider {
+        async fn generate_text(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+            panic!("executor should call the cancellation-aware provider boundary")
+        }
+
+        async fn generate_text_with_cancellation(
+            &self,
+            _request: LlmRequest,
+            cancellation: &ProviderCancellationToken,
+        ) -> Result<LlmResponse, ProviderError> {
+            cancellation.cancel();
+            cancellation.check_cancelled()?;
+            unreachable!("cancelled token must return ProviderError::Cancelled")
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl ImageProvider for CancelAwareLlmProvider {
+        async fn generate_image(
+            &self,
+            _request: ImageRequest,
+        ) -> Result<ImageResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-aware-test".to_string(),
+                "image",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl VideoProvider for CancelAwareLlmProvider {
+        async fn generate_video(
+            &self,
+            _request: VideoRequest,
+        ) -> Result<VideoResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-aware-test".to_string(),
+                "video",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl AudioProvider for CancelAwareLlmProvider {
+        async fn generate_audio(
+            &self,
+            _request: AudioRequest,
+        ) -> Result<AudioResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-aware-test".to_string(),
+                "audio",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Model3dProvider for CancelAwareLlmProvider {
+        async fn generate_model3d(
+            &self,
+            _request: Model3dRequest,
+        ) -> Result<Model3dResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-aware-test".to_string(),
                 "3d",
             ))
         }

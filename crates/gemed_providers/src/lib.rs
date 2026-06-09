@@ -1,7 +1,13 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -563,8 +569,41 @@ pub struct Model3dResponse {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ProviderCancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn check_cancelled(&self) -> Result<(), ProviderError> {
+        if self.is_cancelled() {
+            Err(ProviderError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProviderError {
+    #[error("provider request was cancelled")]
+    Cancelled,
     #[error("provider `{0}` does not implement capability `{1}`")]
     UnsupportedCapability(String, &'static str),
     #[error("provider request is invalid: {0}")]
@@ -583,21 +622,57 @@ pub trait ModelCatalog {
 #[async_trait(?Send)]
 pub trait LlmProvider {
     async fn generate_text(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError>;
+
+    async fn generate_text_with_cancellation(
+        &self,
+        request: LlmRequest,
+        cancellation: &ProviderCancellationToken,
+    ) -> Result<LlmResponse, ProviderError> {
+        cancellation.check_cancelled()?;
+        self.generate_text(request).await
+    }
 }
 
 #[async_trait(?Send)]
 pub trait ImageProvider {
     async fn generate_image(&self, request: ImageRequest) -> Result<ImageResponse, ProviderError>;
+
+    async fn generate_image_with_cancellation(
+        &self,
+        request: ImageRequest,
+        cancellation: &ProviderCancellationToken,
+    ) -> Result<ImageResponse, ProviderError> {
+        cancellation.check_cancelled()?;
+        self.generate_image(request).await
+    }
 }
 
 #[async_trait(?Send)]
 pub trait VideoProvider {
     async fn generate_video(&self, request: VideoRequest) -> Result<VideoResponse, ProviderError>;
+
+    async fn generate_video_with_cancellation(
+        &self,
+        request: VideoRequest,
+        cancellation: &ProviderCancellationToken,
+    ) -> Result<VideoResponse, ProviderError> {
+        cancellation.check_cancelled()?;
+        self.generate_video(request).await
+    }
 }
 
 #[async_trait(?Send)]
 pub trait AudioProvider {
     async fn generate_audio(&self, request: AudioRequest) -> Result<AudioResponse, ProviderError>;
+
+    async fn generate_audio_with_cancellation(
+        &self,
+        request: AudioRequest,
+        cancellation: &ProviderCancellationToken,
+    ) -> Result<AudioResponse, ProviderError> {
+        cancellation.check_cancelled()?;
+        self.generate_audio(request).await
+    }
 }
 
 #[async_trait(?Send)]
@@ -606,6 +681,15 @@ pub trait Model3dProvider {
         &self,
         request: Model3dRequest,
     ) -> Result<Model3dResponse, ProviderError>;
+
+    async fn generate_model3d_with_cancellation(
+        &self,
+        request: Model3dRequest,
+        cancellation: &ProviderCancellationToken,
+    ) -> Result<Model3dResponse, ProviderError> {
+        cancellation.check_cancelled()?;
+        self.generate_model3d(request).await
+    }
 }
 
 #[async_trait(?Send)]
@@ -1891,6 +1975,29 @@ mod tests {
         .expect_err("empty prompt rejected");
 
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn default_provider_cancellation_gate_runs_before_generation() {
+        let provider = MockProvider::default();
+        let cancellation = ProviderCancellationToken::new();
+        cancellation.cancel();
+
+        let err = futures::executor::block_on(provider.generate_text_with_cancellation(
+            LlmRequest {
+                provider: ProviderId::Mock,
+                model: "mock-llm".to_string(),
+                prompt: "hello".to_string(),
+                input_images: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                parameters: Value::Null,
+            },
+            &cancellation,
+        ))
+        .expect_err("cancelled request does not reach mock generation");
+
+        assert!(matches!(err, ProviderError::Cancelled));
     }
 
     #[test]
