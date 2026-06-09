@@ -44,11 +44,17 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      - name: Test desktop provider HTTP feature
+        run: cargo test --workspace --features desktop,providers-http
+
       - name: Clippy desktop
         run: cargo clippy --workspace --all-targets --features desktop -- -D warnings
 
       - name: Clippy web
         run: cargo clippy --workspace --all-targets --no-default-features --features web -- -D warnings
+
+      - name: Clippy desktop provider HTTP feature
+        run: cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 
   web-interaction-smoke:
     name: Web interaction smoke
