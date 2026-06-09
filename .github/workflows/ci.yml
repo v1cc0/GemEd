@@ -69,6 +69,14 @@ jobs:
             os: windows-latest
             target: windows-desktop
             command: dx build --desktop --features desktop
+          - name: Linux desktop bundle
+            os: ubuntu-latest
+            target: linux-desktop-bundle
+            command: dx bundle --desktop --features desktop,bundle --package-types deb
+          - name: Windows desktop bundle
+            os: windows-latest
+            target: windows-desktop-bundle
+            command: dx bundle --desktop --features desktop,bundle --package-types msi
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -83,7 +91,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install Linux desktop dependencies
-        if: matrix.target == 'linux-desktop'
+        if: matrix.target == 'linux-desktop' || matrix.target == 'linux-desktop-bundle'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -132,6 +140,32 @@ jobs:
           if (-not $found) {
             "No Dioxus output directory found in candidate roots." |
               Out-File "$artifactDir/no-dioxus-output-found.txt"
+          }
+
+      - name: Collect Dioxus bundle evidence
+        if: contains(matrix.target, 'bundle')
+        shell: pwsh
+        run: |
+          $artifactDir = "ci-artifacts/${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $candidateRoots = @(
+            "target/dx/gemed/bundle",
+            "$env:HOME/.cargo/target/dx/gemed/bundle",
+            "$env:USERPROFILE/.cargo/target/dx/gemed/bundle"
+          )
+          $found = $false
+          foreach ($root in $candidateRoots) {
+            if ($root -and (Test-Path $root)) {
+              $found = $true
+              $safeName = ($root -replace '[:\\/]+', '_').Trim('_')
+              Copy-Item -Recurse -Force $root "$artifactDir/$safeName"
+              Get-ChildItem -Recurse $root | Select-Object FullName, Length |
+                Out-File "$artifactDir/${safeName}-bundle-manifest.txt"
+            }
+          }
+          if (-not $found) {
+            "No Dioxus bundle directory found in candidate roots." |
+              Out-File "$artifactDir/no-dioxus-bundle-found.txt"
           }
 
       - name: Upload Dioxus build evidence

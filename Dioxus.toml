@@ -15,8 +15,7 @@ level = "4"
 [bundle]
 identifier = "io.github.v1cc0.gemed"
 publisher = "GemEd"
-icon = ["public/icon.png"]
-resources = ["public/*", "examples/*"]
+icon = ["public/icon.png", "public/icon.ico"]
 copyright = ""
 category = "GraphicsAndDesign"
 short_description = "GemEd visual AI workflow editor"

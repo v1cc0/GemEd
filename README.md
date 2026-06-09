@@ -31,8 +31,8 @@ Implemented now:
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
-- Web and Linux desktop build verification
-- Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, CI build matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
+- Web, Linux desktop, and Linux `.deb` bundle verification
+- Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, app/bundle icon configuration, CI build/bundle matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
 
 Not implemented yet:
 
@@ -89,9 +89,16 @@ For release-style build artifacts:
 dx build --web --no-default-features --features web
 dx build --desktop --features desktop
 dx build --desktop --features desktop,providers-http
+dx bundle --desktop --features desktop,bundle --package-types deb
 ```
 
-On Windows, run the desktop build command from a Windows machine/runner.
+On Windows, run the desktop build/bundle commands from a Windows machine/runner:
+
+```powershell
+dx build --desktop --features desktop
+dx build --desktop --features desktop,providers-http
+dx bundle --desktop --features desktop,bundle --package-types msi
+```
 
 ## Validate
 
@@ -104,7 +111,7 @@ cargo clippy --workspace --all-targets --no-default-features --features web -- -
 cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 ```
 
-CI mirrors these gates and runs a Dioxus build matrix for web, Linux desktop, and Windows desktop in `.github/workflows/ci.yml`.
+CI mirrors these gates and runs a Dioxus matrix for web build, Linux/Windows desktop builds, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`.
 
 ## Notes
 
