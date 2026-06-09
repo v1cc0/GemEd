@@ -18,7 +18,7 @@ use gemed_executor::{
 use gemed_providers::OpenAiResponsesProvider;
 use gemed_providers::{
     ProviderCapability, ProviderConfig, ProviderConfigSet, ProviderId, ProviderRegistry,
-    ProviderRuntimeMode,
+    ProviderRuntimeMode, ProviderSecretSource,
 };
 use gemed_storage::{
     DEFAULT_AUTOSAVE_SLOT, DEFAULT_PROVIDER_CONFIG_SLOT, ProviderConfigSnapshot,
@@ -148,11 +148,13 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; align-items: start; border: 1px solid rgba(148, 163, 184, .14); background: rgba(30, 41, 59, .66); border-radius: .8rem; padding: .58rem .65rem; }
 .provider-name { display: flex; align-items: center; gap: .4rem; color: #dbeafe; font-weight: 700; font-size: .82rem; }
 .provider-meta { margin-top: .24rem; color: #98a9c7; font-size: .72rem; line-height: 1.35; overflow-wrap: anywhere; }
+.provider-secret { margin-top: .2rem; color: #c4b5fd; font-size: .7rem; line-height: 1.35; overflow-wrap: anywhere; }
 .provider-status { border-radius: 999px; padding: .12rem .42rem; border: 1px solid rgba(148, 163, 184, .2); color: #b6c5e2; background: rgba(15, 23, 42, .78); font-size: .64rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
 .provider-status.available { color: #bbf7d0; border-color: rgba(74, 222, 128, .26); background: rgba(22, 101, 52, .26); }
 .provider-status.missing { color: #fde68a; border-color: rgba(250, 204, 21, .28); background: rgba(113, 63, 18, .28); }
 .provider-status.disabled { color: #cbd5e1; border-color: rgba(148, 163, 184, .2); background: rgba(51, 65, 85, .36); }
 .provider-actions { display: flex; gap: .28rem; flex-wrap: wrap; justify-content: flex-end; }
+.secret-guide { border: 1px dashed rgba(196, 181, 253, .34); border-radius: .75rem; padding: .58rem .65rem; color: #ddd6fe; background: rgba(109, 40, 217, .12); font-size: .76rem; line-height: 1.4; }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
 "#;
@@ -988,6 +990,7 @@ fn Sidebar(
                 h2 { "Provider Settings" }
                 p { "{provider_settings_summary}" }
                 p { "Only provider mode and secret source labels are saved. Raw API keys stay outside GemEd config state." }
+                p { class: "secret-guide", "{provider_secret_setup_overview()}" }
                 div { class: "handle-actions",
                     button {
                         class: "action",
@@ -1042,10 +1045,14 @@ fn Sidebar(
                             let mock_id = provider.id.clone();
                             let env_id = provider.id.clone();
                             let disabled_id = provider.id.clone();
+                            let setup_id = provider.id.clone();
                             let name = provider.id.display_name();
                             let mode = provider_runtime_mode_label(provider.runtime_mode);
                             let source = provider.secret_source.public_label();
                             let capabilities = provider_capability_list(&provider.capabilities);
+                            let secret_hint = provider_secret_setup_hint(provider);
+                            let can_show_setup = provider.runtime_mode != ProviderRuntimeMode::Mock
+                                && provider.runtime_mode != ProviderRuntimeMode::Disabled;
                             let status = provider_status(provider);
                             let status_class = provider_status_class(provider);
                             rsx! {
@@ -1057,6 +1064,9 @@ fn Sidebar(
                                         }
                                         div { class: "provider-meta",
                                             "{provider_id.as_wire()} · {mode} · {source} · {capabilities}"
+                                        }
+                                        div { class: "provider-secret",
+                                            "{secret_hint}"
                                         }
                                     }
                                     div { class: "provider-actions",
@@ -1083,6 +1093,15 @@ fn Sidebar(
                                                 );
                                             },
                                             "Env"
+                                        }
+                                        if can_show_setup {
+                                            button {
+                                                class: "mini-action neutral",
+                                                onclick: move |_| {
+                                                    message.set(Message::ok(provider_secret_setup_message(&setup_id)));
+                                                },
+                                                "Setup"
+                                            }
                                         }
                                         button {
                                             class: "mini-action",
@@ -2673,6 +2692,70 @@ fn provider_capability_list(capabilities: &[ProviderCapability]) -> String {
 }
 
 #[cfg(feature = "desktop")]
+fn provider_secret_setup_overview() -> &'static str {
+    "Desktop live providers read secrets from the process environment at runtime. Set the listed variable before launching GemEd; Save Providers stores only the variable name, never the secret value."
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn provider_secret_setup_overview() -> &'static str {
+    "Web builds treat provider secrets as backend bindings. Static WASM should not store API keys; Save Providers stores only binding names and runtime modes."
+}
+
+fn provider_secret_setup_hint(config: &ProviderConfig) -> String {
+    match config.runtime_mode {
+        ProviderRuntimeMode::Mock => "Mock provider: no secret required.".to_string(),
+        ProviderRuntimeMode::Disabled => "Provider disabled: no secret required.".to_string(),
+        ProviderRuntimeMode::DirectDesktop => match &config.secret_source {
+            ProviderSecretSource::Environment { variable } => {
+                if provider_secret_env_value(variable).is_some() {
+                    format!("Environment `{variable}` is present for this process.")
+                } else {
+                    format!(
+                        "Set `{variable}` before launching GemEd. This value is not saved in provider settings."
+                    )
+                }
+            }
+            ProviderSecretSource::DesktopKeychain { service, account } => {
+                format!(
+                    "Desktop keychain source `{service}/{account}` is modeled, but keychain writes are not implemented yet."
+                )
+            }
+            ProviderSecretSource::None | ProviderSecretSource::WebBackend { .. } => {
+                "Direct desktop mode needs an environment or keychain secret source.".to_string()
+            }
+        },
+        ProviderRuntimeMode::WebBackend => match &config.secret_source {
+            ProviderSecretSource::WebBackend { binding } => {
+                format!(
+                    "Backend binding `{binding}` must be configured server-side; no browser secret is stored."
+                )
+            }
+            _ => "Web backend mode expects a server-side secret binding.".to_string(),
+        },
+    }
+}
+
+fn provider_secret_setup_message(id: &ProviderId) -> String {
+    let name = id.display_name();
+    let variable = provider_env_variable(id).unwrap_or("CUSTOM_PROVIDER_API_KEY");
+    platform_provider_secret_setup_message(&name, variable)
+}
+
+#[cfg(feature = "desktop")]
+fn platform_provider_secret_setup_message(name: &str, variable: &str) -> String {
+    format!(
+        "{name} setup: export {variable}=... before launching GemEd, then run `dx serve --desktop --features desktop,providers-http` for live HTTP providers. GemEd saves only `{variable}`, not the secret value."
+    )
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn platform_provider_secret_setup_message(name: &str, variable: &str) -> String {
+    format!(
+        "{name} setup: configure backend binding `{variable}` on the server/fullstack deployment. Do not place provider API keys in static WASM or browser localStorage."
+    )
+}
+
+#[cfg(feature = "desktop")]
 fn open_workflow_from_dialog() -> Result<Option<(WorkflowFile, std::path::PathBuf)>, String> {
     let Some(path) = workflow_json_dialog().pick_file() else {
         return Ok(None);
@@ -3002,9 +3085,12 @@ struct ConnectionDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, ensure_json_extension, node_ids_intersecting_rect, workflow_json_filename,
+        CanvasRect, ensure_json_extension, node_ids_intersecting_rect,
+        platform_provider_secret_setup_message, provider_capability_list,
+        provider_secret_setup_hint, workflow_json_filename,
     };
     use gemed_core::{Position, WorkflowFile};
+    use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
     use std::path::PathBuf;
 
     #[test]
@@ -3064,5 +3150,37 @@ mod tests {
             node_ids_intersecting_rect(&workflow, rect),
             vec!["node_prompt"]
         );
+    }
+
+    #[test]
+    fn provider_capability_list_is_human_readable() {
+        assert_eq!(
+            provider_capability_list(&[ProviderCapability::Llm, ProviderCapability::Image]),
+            "llm, image"
+        );
+        assert_eq!(provider_capability_list(&[]), "no declared capabilities");
+    }
+
+    #[test]
+    fn provider_secret_hint_never_contains_secret_values() {
+        let config = ProviderConfig::direct_desktop_env(
+            ProviderId::OpenAi,
+            "OPENAI_API_KEY",
+            Some("gpt-test".to_string()),
+        );
+
+        let hint = provider_secret_setup_hint(&config);
+
+        assert!(hint.contains("OPENAI_API_KEY"));
+        assert!(!hint.contains("sk-live-secret"));
+    }
+
+    #[test]
+    fn provider_secret_setup_message_points_out_external_secret_boundary() {
+        let message = platform_provider_secret_setup_message("OpenAI", "OPENAI_API_KEY");
+
+        assert!(message.contains("OpenAI"));
+        assert!(message.contains("OPENAI_API_KEY"));
+        assert!(!message.contains("sk-live-secret"));
     }
 }

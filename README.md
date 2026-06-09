@@ -21,6 +21,7 @@ Implemented now:
 - Optional desktop OpenAI Responses API LLM backend behind the `providers-http` feature and `OPENAI_API_KEY`; normal builds keep network/provider calls out unless explicitly enabled
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
 - Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
+- Provider secret setup/status hints that tell users which desktop environment variable or web backend binding to configure without writing API keys into workflow/provider JSON
 - Fake-transport coverage for the opt-in OpenAI LLM backend so request mapping, authorization header construction, response parsing, and transport errors are tested without real API calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs
@@ -34,7 +35,7 @@ Not implemented yet:
 
 - Full editable canvas UX: polished drag/handle affordances
 - Broader live Provider/API execution beyond the opt-in OpenAI LLM desktop path
-- Provider secret entry, OS keychain persistence, and web backend/server-function execution
+- Provider secret entry/storage, OS keychain persistence, and web backend/server-function execution
 - Media/video/3D nodes
 - Media storage polish: richer media capability handling and node-specific media UI affordances
 
