@@ -383,6 +383,25 @@ fn Header(
                     "Provider Sample"
                 }
                 button {
+                    class: "action",
+                    onclick: move |_| {
+                        let next = WorkflowFile::multimodal_provider_example();
+                        match next.to_pretty_json() {
+                            Ok(json) => {
+                                workflow.set(next);
+                                json_text.set(json);
+                                execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
+                                connection_draft.set(None);
+                                message.set(Message::ok("Loaded built-in multimodal provider sample. Use Run Providers with mock defaults to exercise image/video/audio/3D provider traits offline."));
+                            }
+                            Err(err) => message.set(Message::err(format!("Failed to serialize multimodal provider sample workflow: {err}"))),
+                        }
+                    },
+                    "Provider Media"
+                }
+                button {
                     class: "action primary",
                     onclick: move |_| match WorkflowFile::from_json_str(&json_text.read()) {
                         Ok(parsed) => {
@@ -6083,6 +6102,48 @@ mod tests {
                 "{node_id} should receive deterministic mock provider text"
             );
         }
+    }
+
+    #[test]
+    fn multimodal_provider_sample_runs_image_video_audio_and_3d_mocks() {
+        let workflow = WorkflowFile::multimodal_provider_example();
+        let providers = gemed_providers::ProviderRegistry::mock_from_config(
+            &gemed_providers::ProviderConfigSet::mock_all(),
+        );
+
+        let result = gemed_executor::execute_workflow_with_providers(&workflow, &providers)
+            .expect("multimodal provider sample runs through mock registry");
+
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+        assert_eq!(result.report.loading_count(), workflow.nodes.len());
+        let node_value = |node_id: &str, key: &str| {
+            result
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.data.get(key))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+
+        assert!(
+            node_value("provider_image_output", "image")
+                .is_some_and(|value| value.starts_with("mock://image/mock/mock-image"))
+        );
+        assert!(
+            node_value("provider_video_output", "video")
+                .is_some_and(|value| value.starts_with("mock://video/mock/mock-video"))
+        );
+        assert!(
+            node_value("provider_audio_output", "audio")
+                .is_some_and(|value| value.starts_with("mock://audio/mock/mock-audio"))
+        );
+        assert!(
+            node_value("provider_3d_output", "model3d")
+                .is_some_and(|value| value.starts_with("mock://3d/mock/mock-3d"))
+        );
     }
 
     #[test]

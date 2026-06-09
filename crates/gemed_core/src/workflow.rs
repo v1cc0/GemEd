@@ -400,6 +400,182 @@ impl WorkflowFile {
         }
     }
 
+    pub fn multimodal_provider_example() -> Self {
+        Self {
+            name: "GemEd Multimodal Provider Sample".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "provider_media_prompt",
+                    NodeType::Prompt,
+                    Position { x: 80.0, y: 260.0 },
+                    serde_json::json!({
+                        "label": "Shared Media Prompt",
+                        "status": "idle",
+                        "prompt": "Create a compact gemstone editor demo asset."
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_image",
+                    NodeType::NanoBanana,
+                    Position { x: 430.0, y: 40.0 },
+                    serde_json::json!({
+                        "label": "Mock Image",
+                        "status": "idle",
+                        "provider": "mock",
+                        "model": "mock-image",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "outputImage": null,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_video",
+                    NodeType::GenerateVideo,
+                    Position { x: 430.0, y: 220.0 },
+                    serde_json::json!({
+                        "label": "Mock Video",
+                        "status": "idle",
+                        "provider": "mock",
+                        "model": "mock-video",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "outputVideo": null,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_audio",
+                    NodeType::GenerateAudio,
+                    Position { x: 430.0, y: 400.0 },
+                    serde_json::json!({
+                        "label": "Mock Audio",
+                        "status": "idle",
+                        "provider": "mock",
+                        "model": "mock-audio",
+                        "inputPrompt": null,
+                        "outputAudio": null,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_3d",
+                    NodeType::Generate3d,
+                    Position { x: 430.0, y: 580.0 },
+                    serde_json::json!({
+                        "label": "Mock 3D",
+                        "status": "idle",
+                        "provider": "mock",
+                        "model": "mock-3d",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "output3dUrl": null,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_image_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 50.0 },
+                    serde_json::json!({
+                        "label": "Image Output",
+                        "status": "idle",
+                        "contentType": "image"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_video_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 230.0 },
+                    serde_json::json!({
+                        "label": "Video Output",
+                        "status": "idle",
+                        "contentType": "video"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_audio_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 410.0 },
+                    serde_json::json!({
+                        "label": "Audio Output",
+                        "status": "idle",
+                        "contentType": "audio"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_3d_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 590.0 },
+                    serde_json::json!({
+                        "label": "3D Output",
+                        "status": "idle",
+                        "contentType": "3d"
+                    }),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles(
+                    "edge_provider_media_prompt_image",
+                    "provider_media_prompt",
+                    "provider_image",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_media_prompt_video",
+                    "provider_media_prompt",
+                    "provider_video",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_media_prompt_audio",
+                    "provider_media_prompt",
+                    "provider_audio",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_media_prompt_3d",
+                    "provider_media_prompt",
+                    "provider_3d",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_image_output",
+                    "provider_image",
+                    "provider_image_output",
+                    "image",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_video_output",
+                    "provider_video",
+                    "provider_video_output",
+                    "video",
+                    "video",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_audio_output",
+                    "provider_audio",
+                    "provider_audio_output",
+                    "audio",
+                    "audio",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_3d_output",
+                    "provider_3d",
+                    "provider_3d_output",
+                    "3d",
+                    "3d",
+                ),
+            ],
+            ..Self::blank()
+        }
+    }
+
     pub fn media_transform_example() -> Self {
         Self {
             name: "GemEd Media Transform Sample".to_string(),
@@ -1141,6 +1317,42 @@ mod tests {
             .to_pretty_json()
             .expect("serialize provider sample");
         let parsed = WorkflowFile::from_json_str(&json).expect("parse provider sample");
+        assert_eq!(parsed, workflow);
+    }
+
+    #[test]
+    fn multimodal_provider_sample_workflow_is_valid_and_roundtrips() {
+        let workflow = WorkflowFile::multimodal_provider_example();
+        workflow
+            .validate()
+            .expect("multimodal provider sample validates");
+        assert_eq!(workflow.nodes.len(), 9);
+        assert_eq!(workflow.edges.len(), 8);
+        for node_type in [
+            NodeType::NanoBanana,
+            NodeType::GenerateVideo,
+            NodeType::GenerateAudio,
+            NodeType::Generate3d,
+        ] {
+            assert!(workflow.nodes.iter().any(|node| {
+                node.node_type == node_type
+                    && node.data.get("provider").and_then(Value::as_str) == Some("mock")
+            }));
+        }
+        for target_handle in ["image", "video", "audio", "3d"] {
+            assert!(
+                workflow
+                    .edges
+                    .iter()
+                    .any(|edge| edge.target_handle.as_deref() == Some(target_handle)),
+                "missing output edge for {target_handle}"
+            );
+        }
+
+        let json = workflow
+            .to_pretty_json()
+            .expect("serialize multimodal provider sample");
+        let parsed = WorkflowFile::from_json_str(&json).expect("parse multimodal provider sample");
         assert_eq!(parsed, workflow);
     }
 
