@@ -28,6 +28,7 @@ use gemed_storage::{
     DEFAULT_AUTOSAVE_SLOT, DEFAULT_PROVIDER_CONFIG_SLOT, ProviderConfigSnapshot,
     ProviderConfigStorage, WorkflowSnapshot, WorkflowStorage,
 };
+use serde_json::Value;
 
 const CANVAS_WIDTH: f64 = 1400.0;
 const CANVAS_HEIGHT: f64 = 900.0;
@@ -115,6 +116,12 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .badge.error { color: #fecaca; border-color: rgba(248, 113, 113, .28); }
 .badge.loading { color: #bfdbfe; border-color: rgba(96, 165, 250, .32); }
 .node-body { padding: .8rem .85rem; color: #b9c6df; font-size: .82rem; line-height: 1.4; }
+.node-insight { margin-top: .55rem; border: 1px solid rgba(148, 163, 184, .14); border-radius: .75rem; padding: .48rem .55rem; background: rgba(2, 6, 23, .38); }
+.node-insight.ready { border-color: rgba(74, 222, 128, .22); background: rgba(22, 101, 52, .14); }
+.node-insight.adapter { border-color: rgba(250, 204, 21, .26); background: rgba(113, 63, 18, .16); }
+.node-insight.warn { border-color: rgba(248, 113, 113, .22); background: rgba(127, 29, 29, .16); }
+.node-insight-title { color: #e5ecff; font-weight: 800; font-size: .72rem; margin-bottom: .25rem; letter-spacing: .01em; }
+.node-insight p { margin: .16rem 0; color: #adbbd8; font-size: .7rem; line-height: 1.32; overflow-wrap: anywhere; }
 .media-preview-list { display: flex; flex-direction: column; gap: .45rem; margin-top: .65rem; }
 .media-preview { border: 1px solid rgba(148, 163, 184, .14); border-radius: .75rem; overflow: hidden; background: rgba(2, 6, 23, .42); }
 .media-preview-head { display: flex; align-items: center; justify-content: space-between; gap: .4rem; padding: .36rem .48rem; color: #dbeafe; font-size: .68rem; font-weight: 750; }
@@ -1758,6 +1765,7 @@ fn NodeCard(
     let label = node.display_label();
     let preview = node.preview_text();
     let media_previews = media_previews_for_node(&node);
+    let node_insight = node_card_insight(&node);
     let node_id = node.id.clone();
     let source_handles = source_handle_options(&node);
     let target_handles = target_handle_options(&node);
@@ -1872,11 +1880,214 @@ fn NodeCard(
                 if let Some(text) = preview {
                     p { "{text}" }
                 }
+                if let Some(insight) = node_insight {
+                    NodeInsightCard { insight }
+                }
                 MediaPreviewStrip { previews: media_previews, media_overlay }
                 div { class: "node-id", "{node.id}" }
             }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NodeInsight {
+    class: &'static str,
+    title: String,
+    lines: Vec<String>,
+}
+
+#[component]
+fn NodeInsightCard(insight: NodeInsight) -> Element {
+    rsx! {
+        div { class: "{insight.class}",
+            div { class: "node-insight-title", "{insight.title}" }
+            for line in insight.lines.iter() {
+                p { "{line}" }
+            }
+        }
+    }
+}
+
+fn node_card_insight(node: &WorkflowNode) -> Option<NodeInsight> {
+    match node.node_type {
+        NodeType::VideoFrameGrab => Some(video_frame_grab_insight(node)),
+        NodeType::SplitGrid => split_grid_insight(node),
+        _ => None,
+    }
+}
+
+fn video_frame_grab_insight(node: &WorkflowNode) -> NodeInsight {
+    if let Some(plan) = node.data.get("frameGrabPlan").and_then(Value::as_object) {
+        let source = plan.get("source").unwrap_or(&Value::Null);
+        let uri_kind = source
+            .get("uriKind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let mime = source
+            .get("mime")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown MIME");
+        let size = source
+            .get("byteLength")
+            .and_then(Value::as_u64)
+            .map(|bytes| format!(" · {}", human_media_bytes(bytes)));
+        let renderable = source
+            .get("renderableInWebview")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let frame_position = plan
+            .get("framePosition")
+            .and_then(Value::as_str)
+            .unwrap_or("first");
+        let seek_requires_duration = plan
+            .get("seekRequiresDuration")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let seek_line = if seek_requires_duration {
+            format!("seek: {frame_position} frame waits for duration metadata")
+        } else if let Some(seconds) = plan.get("requestedSeekSeconds").and_then(Value::as_f64) {
+            format!("seek: {frame_position} frame at {seconds:.3}s")
+        } else {
+            format!("seek: {frame_position} frame")
+        };
+        let preview_line = if renderable {
+            "preview: source can be handed to the WebView player".to_string()
+        } else {
+            "preview: source must be hydrated or handled by a platform adapter".to_string()
+        };
+        let requires_decode = plan
+            .get("requiresDecodeAdapter")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut lines = vec![
+            format!("source: {uri_kind} · {mime}{}", size.unwrap_or_default()),
+            seek_line,
+            preview_line,
+        ];
+        if requires_decode {
+            lines.push(
+                "adapter: decode/canvas PNG capture pending; no output image emitted".to_string(),
+            );
+        }
+        return NodeInsight {
+            class: if requires_decode {
+                "node-insight adapter"
+            } else {
+                "node-insight ready"
+            },
+            title: "Frame grab plan".to_string(),
+            lines,
+        };
+    }
+
+    if let Some(error) = node
+        .data
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+    {
+        return NodeInsight {
+            class: "node-insight warn",
+            title: "Frame grab plan".to_string(),
+            lines: vec![format!("planning failed: {}", truncate_chars(error, 120))],
+        };
+    }
+
+    NodeInsight {
+        class: "node-insight adapter",
+        title: "Frame grab plan".to_string(),
+        lines: vec![
+            "Run Local to inspect source/seek metadata.".to_string(),
+            "PNG capture still needs a browser/native decode adapter.".to_string(),
+        ],
+    }
+}
+
+fn split_grid_insight(node: &WorkflowNode) -> Option<NodeInsight> {
+    let images = node
+        .data
+        .get("images")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let populated = images
+        .iter()
+        .filter(|image| image.as_str().is_some_and(|value| !value.trim().is_empty()))
+        .count();
+    let children = node
+        .data
+        .get("childNodeIds")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let adapter = node
+        .data
+        .get("__mediaAdapter")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+
+    if populated == 0 && children == 0 && adapter.is_none() {
+        return None;
+    }
+
+    let target_count = node
+        .data
+        .get("targetCount")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_else(|| images.len().max(populated));
+    let mut lines = vec![format!(
+        "cells: {populated}/{} populated",
+        target_count.max(populated)
+    )];
+    if populated > 0 {
+        lines.push(format!(
+            "routing: image-0{} handles available",
+            if populated > 1 {
+                format!("..image-{}", populated - 1)
+            } else {
+                String::new()
+            }
+        ));
+    } else {
+        lines.push("Run Local to populate split cell images.".to_string());
+    }
+    if children > 0 {
+        lines.push(format!("children: {children} generated cell set(s)"));
+    }
+    if let Some(adapter) = adapter {
+        lines.push(format!("adapter: {adapter}"));
+    }
+
+    Some(NodeInsight {
+        class: if populated > 0 {
+            "node-insight ready"
+        } else {
+            "node-insight adapter"
+        },
+        title: "Split grid cells".to_string(),
+        lines,
+    })
+}
+
+fn human_media_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", value.chars().take(keep).collect::<String>())
 }
 
 #[component]
@@ -3950,13 +4161,13 @@ impl CopyStatus {
 mod tests {
     use super::{
         CanvasRect, CopyStatus, copy_media_uri_script, ensure_json_extension, media_error_message,
-        media_overlay_from_preview, media_preview_kind_class, node_ids_intersecting_rect,
-        platform_provider_secret_setup_message, provider_capability_list,
-        provider_default_model_placeholder, provider_secret_setup_hint,
+        media_overlay_from_preview, media_preview_kind_class, node_card_insight,
+        node_ids_intersecting_rect, platform_provider_secret_setup_message,
+        provider_capability_list, provider_default_model_placeholder, provider_secret_setup_hint,
         sanitize_optional_provider_base_url, sanitize_optional_provider_text,
         workflow_json_filename,
     };
-    use gemed_core::{Position, WorkflowFile};
+    use gemed_core::{NodeType, Position, WorkflowFile, WorkflowNode};
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
     use std::path::PathBuf;
@@ -4256,6 +4467,84 @@ mod tests {
             grab.data
                 .get("outputImage")
                 .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn node_card_insight_summarizes_frame_grab_plan_without_fake_output() {
+        let workflow = WorkflowFile::video_frame_grab_example();
+        let result =
+            gemed_executor::execute_simple_workflow(&workflow).expect("frame sample plans");
+        let grab = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "frame_grab")
+            .expect("frame grab node exists");
+
+        let insight = node_card_insight(grab).expect("frame grab insight exists");
+
+        assert_eq!(insight.title, "Frame grab plan");
+        assert_eq!(insight.class, "node-insight adapter");
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("inlineData") && line.contains("video/mp4"))
+        );
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("first frame at 0.001s"))
+        );
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("no output image emitted"))
+        );
+    }
+
+    #[test]
+    fn node_card_insight_summarizes_split_grid_cells_and_children() {
+        let node = WorkflowNode::new(
+            "split",
+            NodeType::SplitGrid,
+            Position { x: 0.0, y: 0.0 },
+            serde_json::json!({
+                "targetCount": 3,
+                "images": [
+                    "data:image/png;base64,a",
+                    "data:image/png;base64,b"
+                ],
+                "childNodeIds": [
+                    {
+                        "imageInput": "cell_1_image",
+                        "prompt": "cell_1_prompt",
+                        "nanoBanana": "cell_1_generate"
+                    }
+                ],
+                "__mediaAdapter": "rust-inline-image-grid"
+            }),
+        );
+
+        let insight = node_card_insight(&node).expect("split grid insight exists");
+
+        assert_eq!(insight.title, "Split grid cells");
+        assert_eq!(insight.class, "node-insight ready");
+        assert_eq!(insight.lines[0], "cells: 2/3 populated");
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line == "children: 1 generated cell set(s)")
+        );
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line == "adapter: rust-inline-image-grid")
         );
     }
 
