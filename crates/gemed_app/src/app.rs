@@ -123,6 +123,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-preview img, .media-preview video { display: block; width: 100%; max-height: 8rem; object-fit: cover; background: #020617; }
 .media-preview audio { display: block; width: 100%; height: 2.2rem; padding: 0 .35rem .35rem; }
 .media-preview-placeholder { min-height: 3.2rem; display: grid; place-items: center; padding: .7rem; color: #9fb0cf; text-align: center; font-size: .72rem; overflow-wrap: anywhere; background: repeating-linear-gradient(135deg, rgba(148, 163, 184, .06) 0, rgba(148, 163, 184, .06) 8px, transparent 8px, transparent 16px); }
+.media-preview-error { margin: .42rem .48rem 0; border-radius: .55rem; padding: .42rem .5rem; color: #fecaca; background: rgba(127, 29, 29, .32); border: 1px solid rgba(248, 113, 113, .22); font-size: .68rem; line-height: 1.3; }
 .media-preview-hint { margin: 0; padding: .34rem .48rem .46rem; color: #8ea1c2; font-size: .68rem; overflow-wrap: anywhere; }
 .media-preview-actions { display: flex; gap: .35rem; padding: .42rem .48rem 0; }
 .media-preview-link { border: 1px solid rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); border-radius: .48rem; padding: .18rem .38rem; font-size: .68rem; text-decoration: none; cursor: pointer; }
@@ -139,6 +140,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-overlay-audio-shell p { margin: 0; color: #bfdbfe; font-size: .84rem; text-align: center; }
 .media-overlay-audio { width: 100%; }
 .media-overlay-placeholder { min-height: 10rem; display: grid; place-items: center; padding: 1rem; color: #9fb0cf; text-align: center; }
+.media-overlay-error { width: min(42rem, 100%); border-radius: .75rem; padding: .72rem .85rem; color: #fecaca; background: rgba(127, 29, 29, .34); border: 1px solid rgba(248, 113, 113, .24); font-size: .82rem; line-height: 1.35; text-align: center; }
 .media-overlay-meta { padding: .65rem 1rem .9rem; color: #9fb0cf; font-size: .75rem; overflow-wrap: anywhere; }
 .media-overlay-actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
@@ -1764,6 +1766,7 @@ fn MediaPreviewCard(
     preview: MediaPreview,
     mut media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
+    let mut load_error = use_signal(|| false);
     let label = preview.label.clone();
     let kind_label = preview.kind.label();
     let kind_class = media_preview_kind_class(preview.kind);
@@ -1774,6 +1777,7 @@ fn MediaPreviewCard(
     let inline_preview = preview.should_inline_preview();
     let download_filename = preview.download_filename();
     let overlay = media_overlay_from_preview(&preview);
+    let error_message = media_error_message(preview.kind);
 
     rsx! {
         div {
@@ -1793,18 +1797,36 @@ fn MediaPreviewCard(
                     src: "{uri}",
                     alt: "{label}",
                     loading: "lazy",
+                    onload: move |_| {
+                        load_error.set(false);
+                    },
+                    onerror: move |_| {
+                        load_error.set(true);
+                    },
                 }
             } else if inline_preview && preview.kind == MediaKind::Video {
                 video {
                     src: "{uri}",
                     controls: true,
                     preload: "metadata",
+                    onloadedmetadata: move |_| {
+                        load_error.set(false);
+                    },
+                    onerror: move |_| {
+                        load_error.set(true);
+                    },
                 }
             } else if inline_preview && preview.kind == MediaKind::Audio {
                 audio {
                     src: "{uri}",
                     controls: true,
                     preload: "metadata",
+                    onloadedmetadata: move |_| {
+                        load_error.set(false);
+                    },
+                    onerror: move |_| {
+                        load_error.set(true);
+                    },
                 }
             } else if renderable && preview.is_large_inline() {
                 div { class: "media-preview-placeholder",
@@ -1817,6 +1839,11 @@ fn MediaPreviewCard(
             } else {
                 div { class: "media-preview-placeholder",
                     "Media reference detected, but this URI must be hydrated or handled by a platform adapter before inline preview."
+                }
+            }
+            if inline_preview && load_error() {
+                div { class: "media-preview-error",
+                    "{error_message}"
                 }
             }
             if renderable {
@@ -1862,12 +1889,23 @@ fn MediaPreviewCard(
 #[component]
 fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element {
     let snapshot = media_overlay.read().clone();
+    let mut load_error = use_signal(|| false);
+    let overlay_error_message = snapshot
+        .as_ref()
+        .map(|overlay| {
+            format!(
+                "{} Try Open or Download to inspect the source directly.",
+                media_error_message(overlay.kind)
+            )
+        })
+        .unwrap_or_default();
 
     rsx! {
         if let Some(overlay) = snapshot {
             div {
                 class: "media-overlay-backdrop",
                 onclick: move |_| {
+                    load_error.set(false);
                     media_overlay.set(None);
                 },
                 div {
@@ -1904,6 +1942,7 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                 class: "media-preview-link",
                                 onclick: move |event: MouseEvent| {
                                     event.stop_propagation();
+                                    load_error.set(false);
                                     media_overlay.set(None);
                                 },
                                 "Close"
@@ -1916,6 +1955,12 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                 class: "media-overlay-image",
                                 src: "{overlay.uri}",
                                 alt: "{overlay.label}",
+                                onload: move |_| {
+                                    load_error.set(false);
+                                },
+                                onerror: move |_| {
+                                    load_error.set(true);
+                                },
                             }
                         } else if overlay.kind == MediaKind::Video {
                             video {
@@ -1923,6 +1968,12 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                 src: "{overlay.uri}",
                                 controls: true,
                                 preload: "metadata",
+                                onloadedmetadata: move |_| {
+                                    load_error.set(false);
+                                },
+                                onerror: move |_| {
+                                    load_error.set(true);
+                                },
                             }
                         } else if overlay.kind == MediaKind::Audio {
                             div { class: "media-overlay-audio-shell",
@@ -1932,11 +1983,22 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                     src: "{overlay.uri}",
                                     controls: true,
                                     preload: "metadata",
+                                    onloadedmetadata: move |_| {
+                                        load_error.set(false);
+                                    },
+                                    onerror: move |_| {
+                                        load_error.set(true);
+                                    },
                                 }
                             }
                         } else {
                             div { class: "media-overlay-placeholder",
                                 "No inline overlay adapter is available for this media kind yet."
+                            }
+                        }
+                        if matches!(overlay.kind, MediaKind::Image | MediaKind::Audio | MediaKind::Video) && load_error() {
+                            div { class: "media-overlay-error",
+                                "{overlay_error_message}"
                             }
                         }
                     }
@@ -1974,6 +2036,23 @@ fn media_preview_kind_class(kind: MediaKind) -> &'static str {
         MediaKind::Audio => "media-preview-kind audio",
         MediaKind::Video => "media-preview-kind video",
         MediaKind::Model3d => "media-preview-kind model3d",
+    }
+}
+
+fn media_error_message(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => {
+            "Image preview failed to load. The URI may be missing, blocked, or unsupported."
+        }
+        MediaKind::Audio => {
+            "Audio preview failed to load. The URI may be missing, blocked, or unsupported."
+        }
+        MediaKind::Video => {
+            "Video preview failed to load. The URI may be missing, blocked, or unsupported."
+        }
+        MediaKind::Model3d => {
+            "3D preview requires a GLB/WebGL adapter before it can be loaded inline."
+        }
     }
 }
 
@@ -3425,9 +3504,10 @@ struct MediaOverlay {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, ensure_json_extension, media_overlay_from_preview, media_preview_kind_class,
-        node_ids_intersecting_rect, platform_provider_secret_setup_message,
-        provider_capability_list, provider_secret_setup_hint, workflow_json_filename,
+        CanvasRect, ensure_json_extension, media_error_message, media_overlay_from_preview,
+        media_preview_kind_class, node_ids_intersecting_rect,
+        platform_provider_secret_setup_message, provider_capability_list,
+        provider_secret_setup_hint, workflow_json_filename,
     };
     use gemed_core::{Position, WorkflowFile};
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
@@ -3535,6 +3615,14 @@ mod tests {
             media_preview_kind_class(MediaKind::Model3d),
             "media-preview-kind model3d"
         );
+    }
+
+    #[test]
+    fn media_error_messages_are_specific_and_stable() {
+        assert!(media_error_message(MediaKind::Image).starts_with("Image preview failed"));
+        assert!(media_error_message(MediaKind::Audio).starts_with("Audio preview failed"));
+        assert!(media_error_message(MediaKind::Video).starts_with("Video preview failed"));
+        assert!(media_error_message(MediaKind::Model3d).contains("GLB/WebGL adapter"));
     }
 
     #[test]
