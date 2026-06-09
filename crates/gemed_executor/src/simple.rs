@@ -716,7 +716,7 @@ fn execute_glb_viewer(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutc
             updates.insert("__mediaAdapter".to_string(), json!("rust-glb-viewer-plan"));
 
             let message = if can_open_uri_directly {
-                "GLB viewer WebView preview planned; PNG capture is available through the opt-in WebView model-viewer action."
+                "GLB viewer local-first WebView preview planned; PNG capture is available through the opt-in WebView model-viewer action."
             } else {
                 "GLB viewer adapter boundary planned; project media must be hydrated before WebView preview/capture."
             };

@@ -35,7 +35,8 @@ const CANVAS_HEIGHT: f64 = 900.0;
 const NODE_CARD_WIDTH: f64 = 248.0;
 const NODE_CARD_HEIGHT: f64 = 128.0;
 const GROUP_SELECTION_MIN_SIZE: f64 = 18.0;
-const MODEL_VIEWER_MODULE_URL: &str =
+const MODEL_VIEWER_LOCAL_MODULE_URL: &str = "/vendor/model-viewer/4.3.1/model-viewer.min.js";
+const MODEL_VIEWER_CDN_MODULE_URL: &str =
     "https://unpkg.com/@google/model-viewer@4.3.1/dist/model-viewer.min.js";
 
 const APP_CSS: &str = r#"
@@ -2837,7 +2838,8 @@ fn media_error_message(kind: MediaKind) -> &'static str {
 fn glb_model_viewer_srcdoc(uri: &str, label: &str) -> String {
     let uri = html_attr_escape(uri);
     let label = html_attr_escape(label);
-    let module_url = html_attr_escape(MODEL_VIEWER_MODULE_URL);
+    let local_module_url = html_attr_escape(MODEL_VIEWER_LOCAL_MODULE_URL);
+    let fallback_module_url = html_attr_escape(MODEL_VIEWER_CDN_MODULE_URL);
     format!(
         r#"<!doctype html>
 <html>
@@ -2874,7 +2876,26 @@ fn glb_model_viewer_srcdoc(uri: &str, label: &str) -> String {
       text-align: center;
     }}
   </style>
-  <script type="module" src="{module_url}"></script>
+  <script type="module">
+    const localModuleUrl = "{local_module_url}";
+    const fallbackModuleUrl = "{fallback_module_url}";
+    const loadModule = (src) => new Promise((resolve, reject) => {{
+      const script = document.createElement("script");
+      script.type = "module";
+      script.src = src;
+      script.onload = () => resolve(src);
+      script.onerror = () => reject(new Error(`Failed to load ${{src}}`));
+      document.head.appendChild(script);
+    }});
+    if (!customElements.get("model-viewer")) {{
+      loadModule(localModuleUrl).catch(() => loadModule(fallbackModuleUrl)).catch((error) => {{
+        const fallback = document.querySelector(".fallback");
+        if (fallback) {{
+          fallback.textContent = String(error && (error.message || error));
+        }}
+      }});
+    }}
+  </script>
 </head>
 <body>
   <model-viewer
@@ -3030,15 +3051,18 @@ fn glb_capture_script(request: &GlbCaptureRequest) -> String {
     let source_uri =
         serde_json::to_string(&request.source_uri).unwrap_or_else(|_| "\"\"".to_string());
     let label = serde_json::to_string(&request.label).unwrap_or_else(|_| "\"GLB\"".to_string());
-    let module_url =
-        serde_json::to_string(MODEL_VIEWER_MODULE_URL).unwrap_or_else(|_| "\"\"".to_string());
+    let local_module_url =
+        serde_json::to_string(MODEL_VIEWER_LOCAL_MODULE_URL).unwrap_or_else(|_| "\"\"".to_string());
+    let fallback_module_url =
+        serde_json::to_string(MODEL_VIEWER_CDN_MODULE_URL).unwrap_or_else(|_| "\"\"".to_string());
     let timeout_ms = request.timeout_ms;
 
     format!(
         r#"
 const sourceUri = {source_uri};
 const label = {label};
-const moduleUrl = {module_url};
+const localModuleUrl = {local_module_url};
+const fallbackModuleUrl = {fallback_module_url};
 const timeoutMs = {timeout_ms};
 let objectUrl = null;
 let model = null;
@@ -3117,15 +3141,22 @@ try {{
             }}
         }};
 
+        const loadModelViewerModule = (src) => new Promise((resolve, reject) => {{
+            const script = document.createElement("script");
+            script.type = "module";
+            script.src = src;
+            script.onload = () => resolve(src);
+            script.onerror = () => reject(new Error(`Failed to load model-viewer module: ${{src}}`));
+            document.head.appendChild(script);
+        }});
+
         if (customElements.get("model-viewer")) {{
             start();
         }} else {{
-            const script = document.createElement("script");
-            script.type = "module";
-            script.src = moduleUrl;
-            script.onload = () => start();
-            script.onerror = () => fail(new Error("Failed to load model-viewer module"));
-            document.head.appendChild(script);
+            loadModelViewerModule(localModuleUrl)
+                .catch(() => loadModelViewerModule(fallbackModuleUrl))
+                .then(() => start())
+                .catch((error) => fail(error));
         }}
     }});
     cleanup();
@@ -5537,13 +5568,17 @@ mod tests {
     }
 
     #[test]
-    fn glb_model_viewer_srcdoc_escapes_inputs_and_loads_model_viewer_module() {
+    fn glb_model_viewer_srcdoc_escapes_inputs_and_loads_local_model_viewer_first() {
         let html = super::glb_model_viewer_srcdoc(
             "data:model/gltf-binary;base64,AA\"<&",
             "Inline \"GLB\" <test>",
         );
 
+        assert!(html.contains("/vendor/model-viewer/4.3.1/model-viewer.min.js"));
         assert!(html.contains("@google/model-viewer@4.3.1"));
+        assert!(
+            html.contains("loadModule(localModuleUrl).catch(() => loadModule(fallbackModuleUrl))")
+        );
         assert!(html.contains("<model-viewer"));
         assert!(html.contains("camera-controls"));
         assert!(html.contains("data:model/gltf-binary;base64,AA&quot;&lt;&amp;"));
@@ -5645,7 +5680,10 @@ mod tests {
         let script = glb_capture_script(&request);
 
         assert!(script.contains("document.createElement(\"model-viewer\")"));
+        assert!(script.contains("/vendor/model-viewer/4.3.1/model-viewer.min.js"));
         assert!(script.contains("@google/model-viewer@4.3.1"));
+        assert!(script.contains("loadModelViewerModule(localModuleUrl)"));
+        assert!(script.contains(".catch(() => loadModelViewerModule(fallbackModuleUrl))"));
         assert!(script.contains("model.toDataURL(\"image/png\")"));
         assert!(script.contains("URL.revokeObjectURL(objectUrl)"));
         assert!(script.contains("timeoutMs = 1234"));

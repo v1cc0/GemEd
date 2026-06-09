@@ -1110,7 +1110,7 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
             vec![MediaKind::Model3d, MediaKind::Image],
             MediaSupportLevel::PreviewOnly,
             MediaSupportLevel::PreviewOnly,
-            "Renderable GLB URIs can preview through the WebView model-viewer adapter and expose an opt-in WebView PNG snapshot capture action; project refs need hydration before preview/capture.",
+            "Renderable GLB URIs can preview through the local-first WebView model-viewer adapter and expose an opt-in WebView PNG snapshot capture action; project refs need hydration before preview/capture.",
         ),
         NodeType::Output | NodeType::OutputGallery => profile(
             node_type,
