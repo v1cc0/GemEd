@@ -71,6 +71,14 @@ pub struct SplitGridChildGeneration {
     pub child_node_ids: Vec<SplitGridChildSet>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitGridChildSelection {
+    pub split_node_id: String,
+    pub child_index: usize,
+    pub child: SplitGridChildSet,
+    pub selected_node_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowUndoStack {
     undo: Vec<WorkflowFile>,
@@ -177,6 +185,75 @@ pub fn select_nodes(workflow: &mut WorkflowFile, node_ids: &[String]) -> EditRes
         node.selected = selected.contains(node.id.as_str()).then_some(true);
     }
     Ok(())
+}
+
+pub fn split_grid_child_sets(
+    workflow: &WorkflowFile,
+    split_node_id: &str,
+) -> EditResult<Vec<SplitGridChildSet>> {
+    let split_node = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == split_node_id)
+        .ok_or_else(|| WorkflowEditError::NodeNotFound(split_node_id.to_string()))?;
+    if split_node.node_type != NodeType::SplitGrid {
+        return Err(WorkflowEditError::InvalidOperation(format!(
+            "`{split_node_id}` is not a split-grid node"
+        )));
+    }
+
+    let sets = split_node
+        .data
+        .get("childNodeIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(SplitGridChildSet {
+                image_input: item.get("imageInput")?.as_str()?.to_string(),
+                prompt: item.get("prompt")?.as_str()?.to_string(),
+                nano_banana: item
+                    .get("nanoBanana")
+                    .or_else(|| item.get("generate"))?
+                    .as_str()?
+                    .to_string(),
+            })
+        })
+        .collect();
+    Ok(sets)
+}
+
+pub fn select_split_grid_child_set(
+    workflow: &mut WorkflowFile,
+    split_node_id: &str,
+    child_index: usize,
+) -> EditResult<SplitGridChildSelection> {
+    if is_node_in_locked_group(workflow, split_node_id) {
+        return Err(WorkflowEditError::NodeInLockedGroup(
+            split_node_id.to_string(),
+        ));
+    }
+
+    let child_sets = split_grid_child_sets(workflow, split_node_id)?;
+    let child = child_sets.get(child_index).cloned().ok_or_else(|| {
+        WorkflowEditError::InvalidOperation(format!(
+            "split-grid node `{split_node_id}` has no child set {}",
+            child_index + 1
+        ))
+    })?;
+    let selected_node_ids = vec![
+        child.image_input.clone(),
+        child.prompt.clone(),
+        child.nano_banana.clone(),
+    ];
+    select_nodes(workflow, &selected_node_ids)?;
+
+    Ok(SplitGridChildSelection {
+        split_node_id: split_node_id.to_string(),
+        child_index,
+        child,
+        selected_node_ids,
+    })
 }
 
 pub fn toggle_node_selection(workflow: &mut WorkflowFile, node_id: &str) -> EditResult<bool> {
@@ -892,6 +969,60 @@ mod tests {
         assert_eq!(selected_node_ids(&workflow), vec!["a", "b"]);
         assert_eq!(workflow.nodes[0].selected, Some(true));
         assert_eq!(workflow.nodes[1].selected, Some(true));
+    }
+
+    #[test]
+    fn selecting_split_grid_child_set_selects_image_prompt_and_generate_nodes() {
+        let mut workflow = WorkflowFile {
+            nodes: vec![
+                WorkflowNode::new(
+                    "split",
+                    NodeType::SplitGrid,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({
+                        "childNodeIds": [
+                            {
+                                "imageInput": "cell_1_image",
+                                "prompt": "cell_1_prompt",
+                                "nanoBanana": "cell_1_generate"
+                            }
+                        ]
+                    }),
+                ),
+                WorkflowNode::new(
+                    "cell_1_image",
+                    NodeType::ImageInput,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+                WorkflowNode::new(
+                    "cell_1_prompt",
+                    NodeType::Prompt,
+                    Position { x: 100.0, y: 180.0 },
+                    json!({}),
+                ),
+                WorkflowNode::new(
+                    "cell_1_generate",
+                    NodeType::NanoBanana,
+                    Position { x: 400.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let selection = select_split_grid_child_set(&mut workflow, "split", 0).unwrap();
+
+        assert_eq!(selection.split_node_id, "split");
+        assert_eq!(selection.child_index, 0);
+        assert_eq!(
+            selection.selected_node_ids,
+            ["cell_1_image", "cell_1_prompt", "cell_1_generate"]
+        );
+        assert_eq!(
+            selected_node_ids(&workflow),
+            vec!["cell_1_image", "cell_1_prompt", "cell_1_generate"]
+        );
     }
 
     #[test]

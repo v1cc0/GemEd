@@ -7,9 +7,9 @@ use gemed_core::{
     GroupColor, NodeGroup, NodeStatus, NodeType, Position, Size, WorkflowEdge, WorkflowFile,
     WorkflowNode, WorkflowUndoStack, add_edge_between, create_group_for_nodes,
     generate_split_grid_children, is_node_in_locked_group, move_group_by, move_node_by,
-    remove_edge, resize_group_by, select_node, selected_node_id, selected_node_ids, set_group_size,
-    set_node_position, source_handle_options, target_handle_options, toggle_group_lock,
-    toggle_node_selection,
+    remove_edge, resize_group_by, select_node, select_split_grid_child_set, selected_node_id,
+    selected_node_ids, set_group_size, set_node_position, source_handle_options,
+    split_grid_child_sets, target_handle_options, toggle_group_lock, toggle_node_selection,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -723,6 +723,15 @@ fn Sidebar(
             (!has_children && !is_node_in_locked_group(&wf, &node.id)).then(|| node.id.clone())
         });
     let can_generate_split_grid_children = selected_split_grid_id.is_some();
+    let selected_split_grid_child_sets = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .filter(|node| node.node_type == NodeType::SplitGrid)
+        .and_then(|node| {
+            split_grid_child_sets(&wf, &node.id)
+                .ok()
+                .map(|sets| (node.id.clone(), sets))
+        });
     let draft_summary = connection_draft
         .read()
         .as_ref()
@@ -1110,6 +1119,47 @@ fn Sidebar(
                         class: "action",
                         onclick: move |_| viewport.with_mut(|viewport| viewport.pan_by(0.0, 64.0)),
                         "Pan ↓"
+                    }
+                }
+                if let Some((split_node_id, child_sets)) = selected_split_grid_child_sets.as_ref() {
+                    if !child_sets.is_empty() {
+                        p { class: "handle-hint",
+                            "Split Grid `{split_node_id}` has {child_sets.len()} generated child set(s). Select one to inspect its ImageInput, Prompt, and Generate nodes together."
+                        }
+                        div { class: "edge-list",
+                            for (index, child) in child_sets.iter().enumerate() {
+                                {
+                                    let child_number = index + 1;
+                                    let split_node_id = split_node_id.clone();
+                                    let child_summary = format!(
+                                        "Cell {child_number}: {} · {} · {}",
+                                        child.image_input,
+                                        child.prompt,
+                                        child.nano_banana
+                                    );
+                                    rsx! {
+                                        div { class: "edge-row",
+                                            code { "{child_summary}" }
+                                            button {
+                                                class: "mini-action neutral",
+                                                onclick: move |_| {
+                                                    focus_split_grid_child_set(
+                                                        &split_node_id,
+                                                        index,
+                                                        &mut workflow,
+                                                        &mut json_text,
+                                                        &mut message,
+                                                        &mut undo_stack,
+                                                        &mut viewport,
+                                                    );
+                                                },
+                                                "Select"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 p { class: "viewport-status",
@@ -2676,6 +2726,69 @@ fn resize_group_by_id(
     );
 }
 
+fn focus_split_grid_child_set(
+    split_node_id: &str,
+    child_index: usize,
+    workflow: &mut Signal<WorkflowFile>,
+    json_text: &mut Signal<String>,
+    message: &mut Signal<Message>,
+    undo_stack: &mut Signal<WorkflowUndoStack>,
+    viewport: &mut Signal<CanvasViewport>,
+) {
+    let split_node_id = split_node_id.to_string();
+    mutate_workflow(workflow, json_text, message, undo_stack, move |workflow| {
+        let selection = select_split_grid_child_set(workflow, &split_node_id, child_index)
+            .map_err(|err| err.to_string())?;
+        let viewport_target =
+            viewport_for_node_ids(workflow, &selection.selected_node_ids).unwrap_or_default();
+        viewport.set(viewport_target);
+        Ok(format!(
+            "Selected split-grid cell {} child set: {}.",
+            selection.child_index + 1,
+            selection.selected_node_ids.join(", ")
+        ))
+    });
+}
+
+fn viewport_for_node_ids(workflow: &WorkflowFile, node_ids: &[String]) -> Option<CanvasViewport> {
+    let bounds = bounds_for_node_ids(workflow, node_ids)?;
+    let center_x = bounds.x + bounds.width / 2.0;
+    let center_y = bounds.y + bounds.height / 2.0;
+    Some(CanvasViewport {
+        zoom: 0.88,
+        pan_x: 520.0 - center_x * 0.88,
+        pan_y: 330.0 - center_y * 0.88,
+    })
+}
+
+fn bounds_for_node_ids(workflow: &WorkflowFile, node_ids: &[String]) -> Option<CanvasRect> {
+    let selected: std::collections::HashSet<&str> = node_ids.iter().map(String::as_str).collect();
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut found = false;
+
+    for node in workflow
+        .nodes
+        .iter()
+        .filter(|node| selected.contains(node.id.as_str()))
+    {
+        found = true;
+        min_x = min_x.min(node.position.x);
+        min_y = min_y.min(node.position.y);
+        max_x = max_x.max(node.position.x + NODE_CARD_WIDTH);
+        max_y = max_y.max(node.position.y + NODE_CARD_HEIGHT);
+    }
+
+    found.then(|| CanvasRect {
+        x: min_x,
+        y: min_y,
+        width: (max_x - min_x).max(0.0),
+        height: (max_y - min_y).max(0.0),
+    })
+}
+
 fn begin_handle_connection(
     source_node_id: &str,
     source_handle: &str,
@@ -4160,14 +4273,17 @@ impl CopyStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, CopyStatus, copy_media_uri_script, ensure_json_extension, media_error_message,
+        CanvasRect, CopyStatus, NODE_CARD_HEIGHT, NODE_CARD_WIDTH, bounds_for_node_ids,
+        copy_media_uri_script, ensure_json_extension, media_error_message,
         media_overlay_from_preview, media_preview_kind_class, node_card_insight,
         node_ids_intersecting_rect, platform_provider_secret_setup_message,
         provider_capability_list, provider_default_model_placeholder, provider_secret_setup_hint,
         sanitize_optional_provider_base_url, sanitize_optional_provider_text,
-        workflow_json_filename,
+        viewport_for_node_ids, workflow_json_filename,
     };
-    use gemed_core::{NodeType, Position, WorkflowFile, WorkflowNode};
+    use gemed_core::{
+        NodeType, Position, WorkflowFile, WorkflowNode, generate_split_grid_children,
+    };
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
     use std::path::PathBuf;
@@ -4546,6 +4662,28 @@ mod tests {
                 .iter()
                 .any(|line| line == "adapter: rust-inline-image-grid")
         );
+    }
+
+    #[test]
+    fn split_grid_child_bounds_and_viewport_cover_generated_child_cluster() {
+        let mut workflow = WorkflowFile::media_transform_example();
+        let generated = generate_split_grid_children(&mut workflow, "transform_split")
+            .expect("split children generate");
+        let first = generated.child_node_ids.first().expect("first child set");
+        let node_ids = vec![
+            first.image_input.clone(),
+            first.prompt.clone(),
+            first.nano_banana.clone(),
+        ];
+
+        let bounds = bounds_for_node_ids(&workflow, &node_ids).expect("bounds exist");
+        let viewport = viewport_for_node_ids(&workflow, &node_ids).expect("viewport exists");
+
+        assert!(bounds.width > NODE_CARD_WIDTH);
+        assert!(bounds.height > NODE_CARD_HEIGHT);
+        assert_eq!(viewport.zoom, 0.88);
+        assert!(viewport.pan_x.is_finite());
+        assert!(viewport.pan_y.is_finite());
     }
 
     #[cfg(feature = "desktop")]
