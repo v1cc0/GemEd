@@ -12,7 +12,7 @@ Implemented now:
 - Representative legacy and media-preview workflow JSON fixtures with import/roundtrip coverage in `gemed_core`
 - Typed node-handle metadata in `gemed_core` for canvas connection UI
 - Graph traversal, connected-input resolution, and topological execution ordering
-- Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, image compare metadata, inline split-grid image cells, and control nodes
+- Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, inline image compare metrics, inline split-grid image cells, and control nodes
 - Built-in starter, Media Sample, Transform Sample, and LLM Provider Sample workflows
 - JSON editor that loads and validates workflow JSON
 - SVG/HTML canvas rendering nodes and edges
@@ -23,7 +23,7 @@ Implemented now:
 - Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
 - Provider secret setup/status hints that tell users which desktop environment variable or web backend binding to configure without writing API keys into workflow/provider JSON
 - Fake-transport coverage for the opt-in Gemini, OpenAI, and Anthropic LLM backends so request mapping, secret/header construction, response parsing, and transport errors are tested without real API calls
-- Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar; inline split-grid PNG/JPEG/WebP transforms now have a first Rust adapter, and desktop project load hydrates saved image refs back into transformable data URLs
+- Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar; inline image compare metrics and split-grid PNG/JPEG/WebP transforms now have first Rust adapters, and desktop project load hydrates saved image refs back into transformable data URLs
 - Node-card media preview foundation that detects common inline/reference media fields, renders size-guarded image/audio/video previews, exposes Open/Download/Copy URI links, supports an in-app image/audio/video media overlay, and flags GLB/project-reference adapter gaps honestly
 - Header action to load the built-in Media Sample and exercise the JSON import/export → node-card preview path without external provider calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
@@ -40,7 +40,7 @@ Not implemented yet:
 - Broader live Provider/API execution beyond the opt-in Gemini/OpenAI/Anthropic LLM desktop paths
 - Provider secret entry/storage, OS keychain persistence, and web backend/server-function execution
 - Real video/audio/3D execution adapters beyond schema/mock capability modeling; split-grid transforms hydrated inline image data URLs; unresolved/missing project refs remain non-fatal preview/storage gaps
-- Media storage polish: richer node-specific editor/player affordances, GLB/WebGL previews, stronger clipboard fallbacks, and real media transform adapters
+- Media storage polish: richer node-specific editor/player affordances, GLB/WebGL previews, stronger clipboard fallbacks, and broader media transform adapters
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 

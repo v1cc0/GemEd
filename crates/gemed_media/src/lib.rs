@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose};
 use gemed_core::{NodeType, WorkflowFile, WorkflowNode};
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage, GenericImageView, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -43,9 +43,65 @@ pub struct SplitGridResult {
     pub images: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageMetadata {
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageDifference {
+    pub pixel_count: u64,
+    pub changed_pixels: u64,
+    pub changed_pixel_ratio: f64,
+    pub mean_absolute_error: f64,
+    pub max_channel_delta: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageCompareResult {
+    pub image_a: InlineImageMetadata,
+    pub image_b: InlineImageMetadata,
+    pub dimensions_match: bool,
+    pub exact_match: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difference: Option<InlineImageDifference>,
+}
+
 pub fn passthrough_inline_image_data_url(value: &str) -> Result<String, MediaTransformError> {
     let (mime, bytes) = decode_inline_image_data_url(value)?;
     encode_image_data_url(&bytes, &mime)
+}
+
+pub fn inspect_inline_image(value: &str) -> Result<InlineImageMetadata, MediaTransformError> {
+    let decoded = decode_inline_image(value)?;
+    Ok(decoded.metadata())
+}
+
+pub fn compare_inline_images(
+    image_a: &str,
+    image_b: &str,
+) -> Result<InlineImageCompareResult, MediaTransformError> {
+    let image_a = decode_inline_image(image_a)?;
+    let image_b = decode_inline_image(image_b)?;
+    let dimensions_match = image_a.image.dimensions() == image_b.image.dimensions();
+    let difference = dimensions_match.then(|| image_difference(&image_a.image, &image_b.image));
+    let exact_match = difference
+        .as_ref()
+        .is_some_and(|difference| difference.changed_pixels == 0);
+
+    Ok(InlineImageCompareResult {
+        image_a: image_a.metadata(),
+        image_b: image_b.metadata(),
+        dimensions_match,
+        exact_match,
+        difference,
+    })
 }
 
 pub fn split_inline_image_grid(
@@ -74,6 +130,29 @@ pub fn split_inline_image_grid(
         cells,
         images,
     })
+}
+
+struct DecodedInlineImage {
+    mime: String,
+    bytes: Vec<u8>,
+    image: DynamicImage,
+}
+
+impl DecodedInlineImage {
+    fn metadata(&self) -> InlineImageMetadata {
+        InlineImageMetadata {
+            mime: self.mime.clone(),
+            width: self.image.width(),
+            height: self.image.height(),
+            byte_length: self.bytes.len(),
+        }
+    }
+}
+
+fn decode_inline_image(value: &str) -> Result<DecodedInlineImage, MediaTransformError> {
+    let (mime, bytes) = decode_inline_image_data_url(value)?;
+    let image = image::load_from_memory(&bytes)?;
+    Ok(DecodedInlineImage { mime, bytes, image })
 }
 
 fn decode_inline_image_data_url(value: &str) -> Result<(String, Vec<u8>), MediaTransformError> {
@@ -162,6 +241,39 @@ fn grid_cells(width: u32, height: u32, rows: u32, cols: u32) -> Vec<GridCellRect
 
 fn crop_image_cell(image: &DynamicImage, cell: GridCellRect) -> DynamicImage {
     image.crop_imm(cell.x, cell.y, cell.width, cell.height)
+}
+
+fn image_difference(image_a: &DynamicImage, image_b: &DynamicImage) -> InlineImageDifference {
+    let image_a = image_a.to_rgba8();
+    let image_b = image_b.to_rgba8();
+    let pixel_count = u64::from(image_a.width()) * u64::from(image_a.height());
+    let mut total_delta = 0u64;
+    let mut changed_pixels = 0u64;
+    let mut max_channel_delta = 0u8;
+
+    for (pixel_a, pixel_b) in image_a.pixels().zip(image_b.pixels()) {
+        let mut pixel_changed = false;
+        for (channel_a, channel_b) in pixel_a.0.iter().zip(pixel_b.0.iter()) {
+            let delta = channel_a.abs_diff(*channel_b);
+            total_delta += u64::from(delta);
+            max_channel_delta = max_channel_delta.max(delta);
+            if delta > 0 {
+                pixel_changed = true;
+            }
+        }
+        if pixel_changed {
+            changed_pixels += 1;
+        }
+    }
+
+    let channel_count = pixel_count.saturating_mul(4).max(1);
+    InlineImageDifference {
+        pixel_count,
+        changed_pixels,
+        changed_pixel_ratio: changed_pixels as f64 / pixel_count.max(1) as f64,
+        mean_absolute_error: total_delta as f64 / channel_count as f64,
+        max_channel_delta,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -532,7 +644,7 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
             vec![MediaKind::Image],
             MediaSupportLevel::Ready,
             MediaSupportLevel::Ready,
-            "Local executor resolves comparison image metadata; richer slider visualization remains UI work.",
+            "Local executor resolves comparison images and computes inline PNG/JPEG/WebP pixel metrics when both inputs are data URLs; richer slider visualization remains UI work.",
         ),
         NodeType::VideoStitch => profile(
             node_type,
@@ -1223,6 +1335,41 @@ mod tests {
 
         assert!(output.starts_with("data:image/png;base64,"));
         assert!(output.len() > "data:image/png;base64,".len());
+    }
+
+    #[test]
+    fn inspect_inline_image_reports_dimensions_and_payload_size() {
+        let tiny = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+        let metadata = inspect_inline_image(tiny).expect("png metadata decodes");
+
+        assert_eq!(metadata.mime, "image/png");
+        assert_eq!(metadata.width, 1);
+        assert_eq!(metadata.height, 1);
+        assert!(metadata.byte_length > 0);
+    }
+
+    #[test]
+    fn compare_inline_images_reports_exact_and_changed_pixels() {
+        let red = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let blue = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+
+        let exact = compare_inline_images(red, red).expect("exact image comparison");
+        let changed = compare_inline_images(red, blue).expect("changed image comparison");
+
+        assert!(exact.dimensions_match);
+        assert!(exact.exact_match);
+        assert_eq!(exact.difference.unwrap().changed_pixels, 0);
+
+        assert!(changed.dimensions_match);
+        assert!(!changed.exact_match);
+        let difference = changed
+            .difference
+            .expect("matching dimensions have metrics");
+        assert_eq!(difference.pixel_count, 1);
+        assert_eq!(difference.changed_pixels, 1);
+        assert!(difference.mean_absolute_error > 0.0);
+        assert!(difference.max_channel_delta > 0);
     }
 
     #[test]

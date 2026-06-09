@@ -3,7 +3,9 @@ use crate::graph::{
     ConnectedInputs, DynamicInputValue, GraphError, connected_inputs, execution_order,
 };
 use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode, is_node_in_locked_group};
-use gemed_media::split_inline_image_grid;
+use gemed_media::{
+    InlineImageCompareResult, compare_inline_images, inspect_inline_image, split_inline_image_grid,
+};
 use gemed_providers::{
     AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
     ProviderRegistry, VideoRequest,
@@ -541,7 +543,43 @@ fn execute_image_compare(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeO
         "outputImage".to_string(),
         optional_string_value(image_a.as_deref()),
     );
-    NodeOutcome::complete("Image compare metadata resolved.", updates)
+    if let Some(image) = image_a.as_deref()
+        && let Ok(metadata) = inspect_inline_image(image)
+    {
+        updates.insert("imageAMetadata".to_string(), json!(metadata));
+    }
+    if let Some(image) = image_b.as_deref()
+        && let Ok(metadata) = inspect_inline_image(image)
+    {
+        updates.insert("imageBMetadata".to_string(), json!(metadata));
+    }
+
+    let mut message = "Image compare metadata resolved.".to_string();
+    if let (Some(left), Some(right)) = (image_a.as_deref(), image_b.as_deref()) {
+        match compare_inline_images(left, right) {
+            Ok(comparison) => {
+                message = image_compare_summary(&comparison);
+                updates.insert("comparison".to_string(), json!(comparison));
+                updates.insert("outputText".to_string(), json!(message.clone()));
+                updates.insert(
+                    "__mediaAdapter".to_string(),
+                    json!("rust-inline-image-compare"),
+                );
+            }
+            Err(err) => {
+                updates.insert("comparison".to_string(), Value::Null);
+                updates.insert("comparisonError".to_string(), json!(err.to_string()));
+                updates.insert(
+                    "__mediaAdapter".to_string(),
+                    json!("rust-inline-image-compare-unavailable"),
+                );
+                message = "Image compare pass-through complete; inline metric adapter unavailable."
+                    .to_string();
+            }
+        }
+    }
+
+    NodeOutcome::complete(message, updates)
 }
 
 fn execute_split_grid(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
@@ -607,6 +645,37 @@ fn execute_output_gallery(inputs: &ConnectedInputs) -> NodeOutcome {
     let mut updates = IndexMap::new();
     updates.insert("images".to_string(), json!(inputs.images));
     NodeOutcome::complete("Output gallery collected upstream images.", updates)
+}
+
+fn image_compare_summary(comparison: &InlineImageCompareResult) -> String {
+    if !comparison.dimensions_match {
+        return format!(
+            "Image sizes differ: {}×{} vs {}×{}.",
+            comparison.image_a.width,
+            comparison.image_a.height,
+            comparison.image_b.width,
+            comparison.image_b.height
+        );
+    }
+    if comparison.exact_match {
+        return format!(
+            "Images are an exact pixel match at {}×{}.",
+            comparison.image_a.width, comparison.image_a.height
+        );
+    }
+    let Some(difference) = comparison.difference.as_ref() else {
+        return "Image comparison completed without pixel metrics.".to_string();
+    };
+    format!(
+        "Images share {}×{} dimensions; {} of {} pixels changed ({:.2}%), MAE {:.2}, max delta {}.",
+        comparison.image_a.width,
+        comparison.image_a.height,
+        difference.changed_pixels,
+        difference.pixel_count,
+        difference.changed_pixel_ratio * 100.0,
+        difference.mean_absolute_error,
+        difference.max_channel_delta
+    )
 }
 
 fn llm_provider_id(node: &WorkflowNode) -> ProviderId {
@@ -1064,6 +1133,80 @@ mod tests {
             Some(image_a)
         );
         assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn image_compare_computes_inline_image_metrics_when_decodable() {
+        let red = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let blue = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+        let workflow = WorkflowFile {
+            name: "compare metrics".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "a",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": red}),
+                ),
+                WorkflowNode::new(
+                    "b",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": blue}),
+                ),
+                WorkflowNode::new(
+                    "cmp",
+                    NodeType::ImageCompare,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles("e1", "a", "cmp", "image", "image-0"),
+                WorkflowEdge::with_handles("e2", "b", "cmp", "image", "image-1"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("executes compare metrics");
+        let compare = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "cmp")
+            .unwrap();
+        let comparison = compare
+            .data
+            .get("comparison")
+            .expect("comparison metrics are stored");
+
+        assert_eq!(
+            compare.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-inline-image-compare")
+        );
+        assert_eq!(
+            comparison.get("dimensionsMatch").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            comparison.get("exactMatch").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            comparison
+                .get("difference")
+                .and_then(|difference| difference.get("changedPixels"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            compare
+                .data
+                .get("outputText")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("1 of 1 pixels changed"))
+        );
+        assert_eq!(result.report.error_count(), 0);
     }
 
     #[test]
