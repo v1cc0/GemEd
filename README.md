@@ -21,6 +21,7 @@ Implemented now:
 - Optional desktop OpenAI Responses API LLM backend behind the `providers-http` feature and `OPENAI_API_KEY`; normal builds keep network/provider calls out unless explicitly enabled
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
 - Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
+- Fake-transport coverage for the opt-in OpenAI LLM backend so request mapping, authorization header construction, response parsing, and transport errors are tested without real API calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
@@ -89,6 +90,7 @@ On Windows, run the desktop build command from a Windows machine/runner.
 ```bash
 cargo fmt --all --check
 cargo test --workspace
+cargo test --workspace --features desktop,providers-http
 cargo clippy --workspace --all-targets --features desktop -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features --features web -- -D warnings
 cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings

@@ -837,6 +837,7 @@ pub struct OpenAiResponsesProvider {
     api_key: String,
     endpoint: String,
     default_model: String,
+    transport: Arc<dyn OpenAiResponsesTransport>,
 }
 
 #[cfg(feature = "http")]
@@ -849,6 +850,7 @@ impl OpenAiResponsesProvider {
             api_key: api_key.into(),
             endpoint: Self::DEFAULT_ENDPOINT.to_string(),
             default_model: Self::DEFAULT_MODEL.to_string(),
+            transport: Arc::new(UreqOpenAiResponsesTransport),
         }
     }
 
@@ -859,6 +861,11 @@ impl OpenAiResponsesProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = model.into();
+        self
+    }
+
+    pub fn with_transport(mut self, transport: impl OpenAiResponsesTransport + 'static) -> Self {
+        self.transport = Arc::new(transport);
         self
     }
 
@@ -937,14 +944,9 @@ impl LlmProvider for OpenAiResponsesProvider {
         validate_prompt(&request.prompt)?;
         let body = openai_responses_request_body(&request);
         let authorization = format!("Bearer {}", self.api_key);
-        let mut response: Value = ureq::post(&self.endpoint)
-            .header("Authorization", authorization)
-            .header("Accept", "application/json")
-            .send_json(&body)
-            .map_err(openai_transport_error)?
-            .body_mut()
-            .read_json()
-            .map_err(openai_transport_error)?;
+        let mut response = self
+            .transport
+            .send_json(&self.endpoint, &authorization, &body)?;
         let text = extract_openai_response_text(&mut response).ok_or_else(|| {
             ProviderError::RequestFailed("OpenAI response did not contain output text".to_string())
         })?;
@@ -953,6 +955,39 @@ impl LlmProvider for OpenAiResponsesProvider {
             provider: ProviderId::OpenAi,
             model: request.model,
         })
+    }
+}
+
+#[cfg(feature = "http")]
+pub trait OpenAiResponsesTransport: std::fmt::Debug {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        authorization: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError>;
+}
+
+#[cfg(feature = "http")]
+#[derive(Clone, Debug)]
+struct UreqOpenAiResponsesTransport;
+
+#[cfg(feature = "http")]
+impl OpenAiResponsesTransport for UreqOpenAiResponsesTransport {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        authorization: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError> {
+        ureq::post(endpoint)
+            .header("Authorization", authorization)
+            .header("Accept", "application/json")
+            .send_json(body)
+            .map_err(openai_transport_error)?
+            .body_mut()
+            .read_json()
+            .map_err(openai_transport_error)
     }
 }
 
@@ -1128,6 +1163,8 @@ fn percent_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "http")]
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn mock_llm_returns_deterministic_text() {
@@ -1355,6 +1392,108 @@ mod tests {
                 .expect_err("missing secret rejected")
                 .to_string(),
             "provider secret is missing: environment variable `OPENAI_API_KEY` is not set"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn openai_provider_uses_transport_and_maps_response() {
+        #[derive(Debug)]
+        struct FakeTransport {
+            response: Mutex<Value>,
+            captured: Arc<Mutex<Option<(String, String, Value)>>>,
+        }
+
+        impl OpenAiResponsesTransport for FakeTransport {
+            fn send_json(
+                &self,
+                endpoint: &str,
+                authorization: &str,
+                body: &Value,
+            ) -> Result<Value, ProviderError> {
+                *self.captured.lock().unwrap() = Some((
+                    endpoint.to_string(),
+                    authorization.to_string(),
+                    body.clone(),
+                ));
+                Ok(self.response.lock().unwrap().clone())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let transport = FakeTransport {
+            response: Mutex::new(serde_json::json!({
+                "output": [
+                    {
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "hello from fake transport"
+                            }
+                        ]
+                    }
+                ]
+            })),
+            captured: Arc::clone(&captured),
+        };
+
+        let provider = OpenAiResponsesProvider::new("sk-test")
+            .with_endpoint("https://proxy.example.test/v1")
+            .with_transport(transport);
+        let response = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::OpenAi,
+            model: "gpt-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: Some(12),
+            parameters: Value::Null,
+        }))
+        .expect("fake transport response maps");
+
+        assert_eq!(response.text, "hello from fake transport");
+        let (endpoint, authorization, body) =
+            captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(endpoint, "https://proxy.example.test/v1/responses");
+        assert_eq!(authorization, "Bearer sk-test");
+        assert_eq!(body["model"], "gpt-test");
+        assert_eq!(body["input"], "say hello");
+        assert_eq!(body["max_output_tokens"], 12);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn openai_provider_reports_transport_errors() {
+        #[derive(Debug)]
+        struct FailingTransport;
+
+        impl OpenAiResponsesTransport for FailingTransport {
+            fn send_json(
+                &self,
+                _endpoint: &str,
+                _authorization: &str,
+                _body: &Value,
+            ) -> Result<Value, ProviderError> {
+                Err(ProviderError::RequestFailed(
+                    "fake network failure".to_string(),
+                ))
+            }
+        }
+
+        let provider = OpenAiResponsesProvider::new("sk-test").with_transport(FailingTransport);
+        let err = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::OpenAi,
+            model: "gpt-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            parameters: Value::Null,
+        }))
+        .expect_err("fake transport failure propagates");
+
+        assert!(
+            matches!(err, ProviderError::RequestFailed(message) if message == "fake network failure")
         );
     }
 }
