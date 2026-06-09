@@ -14,6 +14,7 @@ use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
 };
+use gemed_media::workflow_media_summary;
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
 use gemed_providers::OpenAiResponsesProvider;
 use gemed_providers::{
@@ -607,6 +608,9 @@ fn Sidebar(
     let provider_settings_summary = provider_config_snapshot
         .summary_with(provider_secret_env_value)
         .sentence();
+    let media_summary = workflow_media_summary(&wf);
+    let media_sentence = media_summary.sentence();
+    let extra_media_profiles = media_summary.profiles.len().saturating_sub(6);
     let report = execution_report.read();
 
     rsx! {
@@ -631,6 +635,35 @@ fn Sidebar(
                                 code { "{node_type.title()}" }
                                 span { "× {count}" }
                             }
+                        }
+                    }
+                }
+            }
+            section { class: "panel",
+                h2 { "Media Capabilities" }
+                p { "{media_sentence}" }
+                if media_summary.profiles.is_empty() {
+                    p { "No media-specific nodes yet. Media adapters stay idle for this workflow." }
+                } else {
+                    div { class: "edge-list",
+                        for profile in media_summary.profiles.iter().take(6) {
+                            {
+                                let label = profile.label.clone();
+                                let kind_labels = profile.kind_labels();
+                                let platform_label = profile.platform_label();
+                                let notes = profile.notes.clone();
+                                rsx! {
+                                    div { class: "edge-row",
+                                        code { "{label}: {kind_labels} · {platform_label}" }
+                                    }
+                                    p { class: "viewport-status", "{notes}" }
+                                }
+                            }
+                        }
+                    }
+                    if extra_media_profiles > 0 {
+                        p { class: "viewport-status",
+                            "... and {extra_media_profiles} more media profile(s)."
                         }
                     }
                 }

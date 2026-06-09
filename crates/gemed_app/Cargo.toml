@@ -10,6 +10,7 @@ repository.workspace = true
 dioxus = { workspace = true, features = ["launch", "macro", "html", "signals", "hooks", "logger"] }
 gemed_core = { path = "../gemed_core" }
 gemed_executor = { path = "../gemed_executor" }
+gemed_media = { path = "../gemed_media" }
 gemed_providers = { path = "../gemed_providers" }
 gemed_storage = { path = "../gemed_storage", default-features = false }
 rfd = { workspace = true, optional = true }

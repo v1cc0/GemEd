@@ -11,6 +11,7 @@ members = [
   "crates/gemed_core",
   "crates/gemed_app",
   "crates/gemed_executor",
+  "crates/gemed_media",
   "crates/gemed_providers",
   "crates/gemed_storage",
 ]

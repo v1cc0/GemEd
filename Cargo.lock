@@ -1829,6 +1829,7 @@ dependencies = [
  "dioxus",
  "gemed_core",
  "gemed_executor",
+ "gemed_media",
  "gemed_providers",
  "gemed_storage",
  "rfd",
@@ -1860,6 +1861,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gemed_media"
+version = "0.1.0"
+dependencies = [
+ "gemed_core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
