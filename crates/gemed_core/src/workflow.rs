@@ -194,6 +194,114 @@ impl WorkflowFile {
         }
     }
 
+    pub fn media_transform_example() -> Self {
+        Self {
+            name: "GemEd Media Transform Sample".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "transform_image",
+                    NodeType::ImageInput,
+                    Position { x: 80.0, y: 120.0 },
+                    serde_json::json!({
+                        "label": "2x2 Inline PNG",
+                        "status": "complete",
+                        "image": SAMPLE_GRID_PNG_DATA_URL,
+                        "filename": "gemed-grid.png",
+                        "dimensions": { "width": 2, "height": 2 }
+                    }),
+                ),
+                WorkflowNode::new(
+                    "transform_split",
+                    NodeType::SplitGrid,
+                    Position { x: 430.0, y: 100.0 },
+                    serde_json::json!({
+                        "label": "Rust Split Grid",
+                        "status": "idle",
+                        "sourceImage": null,
+                        "targetCount": 4,
+                        "gridRows": 2,
+                        "gridCols": 2,
+                        "isConfigured": true,
+                        "defaultPrompt": "Describe this grid cell"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "transform_gallery",
+                    NodeType::OutputGallery,
+                    Position { x: 780.0, y: 120.0 },
+                    serde_json::json!({
+                        "label": "Split Output Gallery",
+                        "status": "idle",
+                        "images": []
+                    }),
+                ),
+                WorkflowNode::new(
+                    "transform_compare",
+                    NodeType::ImageCompare,
+                    Position { x: 780.0, y: 390.0 },
+                    serde_json::json!({
+                        "label": "Compare First Two Cells",
+                        "status": "idle",
+                        "imageA": null,
+                        "imageB": null
+                    }),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles(
+                    "edge_transform_input_split",
+                    "transform_image",
+                    "transform_split",
+                    "image",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_gallery_0",
+                    "transform_split",
+                    "transform_gallery",
+                    "image-0",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_gallery_1",
+                    "transform_split",
+                    "transform_gallery",
+                    "image-1",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_gallery_2",
+                    "transform_split",
+                    "transform_gallery",
+                    "image-2",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_gallery_3",
+                    "transform_split",
+                    "transform_gallery",
+                    "image-3",
+                    "image",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_compare_0",
+                    "transform_split",
+                    "transform_compare",
+                    "image-0",
+                    "image-0",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_transform_split_compare_1",
+                    "transform_split",
+                    "transform_compare",
+                    "image-1",
+                    "image-1",
+                ),
+            ],
+            ..Self::blank()
+        }
+    }
+
     pub fn from_json_str(source: &str) -> Result<Self, WorkflowError> {
         let workflow: Self = serde_json::from_str(source)?;
         workflow.validate()?;
@@ -470,6 +578,11 @@ pub enum EdgeStyle {
 fn default_edge_style() -> EdgeStyle {
     EdgeStyle::Curved
 }
+
+const SAMPLE_GRID_PNG_DATA_URL: &str = concat!(
+    "data:image/png;base64,",
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP4z8DwHwyBNBAw/AcAR8oI+ItOQ4UAAAAASUVORK5CYII=",
+);
 
 const SAMPLE_SVG_IMAGE_DATA_URL: &str = concat!(
     "data:image/svg+xml;base64,",
@@ -756,6 +869,34 @@ mod tests {
 
         let json = workflow.to_pretty_json().expect("serialize media sample");
         let parsed = WorkflowFile::from_json_str(&json).expect("parse media sample");
+        assert_eq!(parsed, workflow);
+    }
+
+    #[test]
+    fn media_transform_sample_workflow_is_valid_and_roundtrips() {
+        let workflow = WorkflowFile::media_transform_example();
+        workflow
+            .validate()
+            .expect("media transform sample validates");
+        assert_eq!(workflow.nodes.len(), 4);
+        assert_eq!(workflow.edges.len(), 7);
+        assert!(
+            workflow
+                .nodes
+                .iter()
+                .any(|node| node.node_type == NodeType::SplitGrid)
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source_handle.as_deref() == Some("image-0"))
+        );
+
+        let json = workflow
+            .to_pretty_json()
+            .expect("serialize media transform sample");
+        let parsed = WorkflowFile::from_json_str(&json).expect("parse media transform sample");
         assert_eq!(parsed, workflow);
     }
 

@@ -20,9 +20,11 @@ impl NodeHandle {
 
 pub fn source_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
     match node.node_type {
-        NodeType::ImageInput | NodeType::NanoBanana | NodeType::Annotation => {
-            vec![handle("image", "image")]
-        }
+        NodeType::ImageInput
+        | NodeType::NanoBanana
+        | NodeType::Annotation
+        | NodeType::ImageCompare
+        | NodeType::VideoFrameGrab => vec![handle("image", "image")],
         NodeType::VideoInput
         | NodeType::GenerateVideo
         | NodeType::VideoStitch
@@ -46,11 +48,8 @@ pub fn source_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
         | NodeType::Output => {
             vec![handle("text", "text")]
         }
-        NodeType::SplitGrid
-        | NodeType::OutputGallery
-        | NodeType::ImageCompare
-        | NodeType::VideoFrameGrab
-        | NodeType::Unknown => vec![handle("text", "text")],
+        NodeType::SplitGrid => split_grid_source_handles(node),
+        NodeType::OutputGallery | NodeType::Unknown => vec![handle("text", "text")],
     }
 }
 
@@ -104,6 +103,29 @@ pub fn selected_handle_or_first(handles: &[NodeHandle], selected: &str) -> Strin
         .or_else(|| handles.first())
         .map(|handle| handle.id.clone())
         .unwrap_or_default()
+}
+
+fn split_grid_source_handles(node: &WorkflowNode) -> Vec<NodeHandle> {
+    let image_count = node
+        .data
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+        .max(
+            node.data
+                .get("targetCount")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
+        );
+    let mut handles = vec![handle("image", "first image")];
+    for index in 0..image_count.min(12) {
+        handles.push(handle(
+            format!("image-{index}"),
+            format!("image {}", index + 1),
+        ));
+    }
+    dedupe_handles(handles)
 }
 
 fn array_source_handles(node: &WorkflowNode) -> Vec<NodeHandle> {
@@ -223,6 +245,20 @@ mod tests {
         let handles = source_handle_options(&node);
         let ids: Vec<&str> = handles.iter().map(|handle| handle.id.as_str()).collect();
         assert_eq!(ids, vec!["text", "text-0", "text-1"]);
+    }
+
+    #[test]
+    fn split_grid_source_handles_include_generated_image_cells() {
+        let node = WorkflowNode::new(
+            "split",
+            NodeType::SplitGrid,
+            Position { x: 0.0, y: 0.0 },
+            json!({"targetCount":3}),
+        );
+
+        let handles = source_handle_options(&node);
+        let ids: Vec<&str> = handles.iter().map(|handle| handle.id.as_str()).collect();
+        assert_eq!(ids, vec!["image", "image-0", "image-1", "image-2"]);
     }
 
     #[test]

@@ -1860,6 +1860,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gemed_core",
+ "gemed_media",
  "gemed_providers",
  "indexmap",
  "regex",
@@ -1872,9 +1873,12 @@ dependencies = [
 name = "gemed_media"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "gemed_core",
+ "image",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

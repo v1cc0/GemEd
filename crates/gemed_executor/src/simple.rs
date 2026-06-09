@@ -3,6 +3,7 @@ use crate::graph::{
     ConnectedInputs, DynamicInputValue, GraphError, connected_inputs, execution_order,
 };
 use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode, is_node_in_locked_group};
+use gemed_media::split_inline_image_grid;
 use gemed_providers::{
     AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
     ProviderRegistry, VideoRequest,
@@ -233,9 +234,11 @@ async fn execute_node(
         NodeType::Prompt => execute_prompt(node, inputs),
         NodeType::Array => execute_array(node, inputs),
         NodeType::PromptConstructor => execute_prompt_constructor(node, inputs),
-        NodeType::Annotation => execute_annotation(inputs),
+        NodeType::Annotation => execute_annotation(node, inputs),
         NodeType::Output => execute_output(inputs),
         NodeType::OutputGallery => execute_output_gallery(inputs),
+        NodeType::SplitGrid => execute_split_grid(node, inputs),
+        NodeType::ImageCompare => execute_image_compare(node, inputs),
         NodeType::Router | NodeType::Switch | NodeType::ConditionalSwitch => NodeOutcome::complete(
             "Control node evaluated as a pass-through/gate.",
             IndexMap::new(),
@@ -245,9 +248,7 @@ async fn execute_node(
         NodeType::Generate3d => execute_3d_generation(node, inputs, providers).await,
         NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers).await,
         NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers).await,
-        NodeType::SplitGrid
-        | NodeType::ImageCompare
-        | NodeType::VideoStitch
+        NodeType::VideoStitch
         | NodeType::EaseCurve
         | NodeType::VideoTrim
         | NodeType::VideoFrameGrab
@@ -496,13 +497,90 @@ fn execute_prompt_constructor(node: &WorkflowNode, inputs: &ConnectedInputs) -> 
     NodeOutcome::complete("Prompt template constructed.", updates)
 }
 
-fn execute_annotation(inputs: &ConnectedInputs) -> NodeOutcome {
+fn execute_annotation(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
     let mut updates = IndexMap::new();
-    if let Some(image) = inputs.images.first() {
+    let source_image = inputs
+        .images
+        .first()
+        .cloned()
+        .or_else(|| string_field(&node.data, "sourceImage"));
+    if let Some(image) = source_image {
         updates.insert("sourceImage".to_string(), json!(image));
-        updates.insert("outputImage".to_string(), json!(image));
+        updates.insert("sourceImageRef".to_string(), Value::Null);
+        let previous_output = string_field(&node.data, "outputImage");
+        let previous_source = string_field(&node.data, "sourceImage");
+        if previous_output.is_none() || previous_output == previous_source {
+            updates.insert("outputImage".to_string(), json!(image));
+            updates.insert("outputImageRef".to_string(), Value::Null);
+        }
     }
     NodeOutcome::complete("Annotation pass-through complete.", updates)
+}
+
+fn execute_image_compare(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
+    let image_a = inputs
+        .images
+        .first()
+        .cloned()
+        .or_else(|| string_field(&node.data, "imageA"));
+    let image_b = inputs
+        .images
+        .get(1)
+        .cloned()
+        .or_else(|| string_field(&node.data, "imageB"));
+    let mut updates = IndexMap::new();
+    updates.insert(
+        "imageA".to_string(),
+        optional_string_value(image_a.as_deref()),
+    );
+    updates.insert(
+        "imageB".to_string(),
+        optional_string_value(image_b.as_deref()),
+    );
+    updates.insert(
+        "outputImage".to_string(),
+        optional_string_value(image_a.as_deref()),
+    );
+    NodeOutcome::complete("Image compare metadata resolved.", updates)
+}
+
+fn execute_split_grid(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
+    let source_image = inputs
+        .images
+        .first()
+        .cloned()
+        .or_else(|| string_field(&node.data, "sourceImage"));
+    let Some(source_image) = source_image else {
+        return NodeOutcome::error(
+            "Split grid requires a connected source image.".to_string(),
+            IndexMap::new(),
+        );
+    };
+
+    let rows = grid_dimension(node, "gridRows", 2);
+    let cols = grid_dimension(node, "gridCols", 2);
+    let target_count =
+        integer_field(&node.data, "targetCount").and_then(|value| usize::try_from(value).ok());
+
+    match split_inline_image_grid(&source_image, rows, cols, target_count) {
+        Ok(result) => {
+            let mut updates = IndexMap::new();
+            updates.insert("sourceImage".to_string(), json!(source_image));
+            updates.insert("sourceImageRef".to_string(), Value::Null);
+            updates.insert("gridRows".to_string(), json!(result.rows));
+            updates.insert("gridCols".to_string(), json!(result.cols));
+            updates.insert("targetCount".to_string(), json!(result.images.len()));
+            updates.insert("images".to_string(), json!(result.images));
+            updates.insert("cells".to_string(), json!(result.cells));
+            updates.insert("isConfigured".to_string(), json!(true));
+            updates.insert(
+                "__mediaAdapter".to_string(),
+                json!("rust-inline-image-grid"),
+            );
+            NodeOutcome::complete("Split grid produced inline image cells.", updates)
+        }
+        Err(err) => NodeOutcome::error(format!("Split grid failed: {err}"), IndexMap::new()),
+    }
 }
 
 fn execute_output(inputs: &ConnectedInputs) -> NodeOutcome {
@@ -585,6 +663,17 @@ fn array_options_from_node(node: &WorkflowNode) -> ParseArrayOptions {
         trim_items: bool_field(&node.data, "trimItems").unwrap_or(true),
         remove_empty: bool_field(&node.data, "removeEmpty").unwrap_or(true),
     }
+}
+
+fn grid_dimension(node: &WorkflowNode, key: &str, fallback: u32) -> u32 {
+    integer_field(&node.data, key)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+fn optional_string_value(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |value| json!(value))
 }
 
 fn apply_updates(node: &mut WorkflowNode, updates: IndexMap<String, Value>) {
@@ -865,5 +954,188 @@ mod tests {
                 .is_some_and(|value| value.starts_with("mock://image/mock/mock-image"))
         );
         assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn image_compare_resolves_connected_images_and_can_feed_output() {
+        let image_a = "data:image/png;base64,a";
+        let image_b = "data:image/png;base64,b";
+        let workflow = WorkflowFile {
+            name: "compare".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "a",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": image_a}),
+                ),
+                WorkflowNode::new(
+                    "b",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": image_b}),
+                ),
+                WorkflowNode::new(
+                    "cmp",
+                    NodeType::ImageCompare,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::new("e1", "a", "cmp"),
+                WorkflowEdge::new("e2", "b", "cmp"),
+                WorkflowEdge::new("e3", "cmp", "output"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("executes compare");
+        let compare = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "cmp")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+
+        assert_eq!(
+            compare.data.get("imageA").and_then(Value::as_str),
+            Some(image_a)
+        );
+        assert_eq!(
+            compare.data.get("imageB").and_then(Value::as_str),
+            Some(image_b)
+        );
+        assert_eq!(
+            compare.data.get("outputImage").and_then(Value::as_str),
+            Some(image_a)
+        );
+        assert_eq!(
+            output.data.get("image").and_then(Value::as_str),
+            Some(image_a)
+        );
+        assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn split_grid_splits_inline_image_and_routes_selected_cell() {
+        let source = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP4z8DwHwyBNBAw/AcAR8oI+ItOQ4UAAAAASUVORK5CYII=";
+        let workflow = WorkflowFile {
+            name: "split".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "input",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": source}),
+                ),
+                WorkflowNode::new(
+                    "split",
+                    NodeType::SplitGrid,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"gridRows":2,"gridCols":2,"targetCount":3}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::new("e1", "input", "split"),
+                WorkflowEdge {
+                    source_handle: Some("image-1".to_string()),
+                    target_handle: Some("image".to_string()),
+                    ..WorkflowEdge::new("e2", "split", "output")
+                },
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("executes split grid");
+        let split = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "split")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        let images = split
+            .data
+            .get("images")
+            .and_then(Value::as_array)
+            .expect("split images are stored");
+
+        assert_eq!(images.len(), 3);
+        assert!(images.iter().all(|image| {
+            image
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        }));
+        assert_eq!(
+            split.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-inline-image-grid")
+        );
+        assert_eq!(output.data.get("image"), images.get(1));
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn split_grid_reports_non_inline_project_reference_gap() {
+        let workflow = WorkflowFile {
+            name: "split ref".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "split",
+                NodeType::SplitGrid,
+                Position { x: 0.0, y: 0.0 },
+                json!({
+                    "sourceImage": "gemed-media://media/input.png",
+                    "gridRows": 2,
+                    "gridCols": 2
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("execution records node error");
+        let split = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "split")
+            .unwrap();
+
+        assert_eq!(
+            split.data.get("status").and_then(Value::as_str),
+            Some("error")
+        );
+        assert!(
+            split
+                .data
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("only inline image data URLs"))
+        );
+        assert_eq!(result.report.error_count(), 1);
     }
 }

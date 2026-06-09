@@ -1,8 +1,168 @@
+use base64::{Engine as _, engine::general_purpose};
 use gemed_core::{NodeType, WorkflowFile, WorkflowNode};
+use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 pub const DEFAULT_INLINE_PREVIEW_LIMIT_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Error)]
+pub enum MediaTransformError {
+    #[error(
+        "unsupported media URI `{0}`; only inline image data URLs are transformable in the current local adapter"
+    )]
+    UnsupportedUri(String),
+    #[error("unsupported inline image media type `{0}`")]
+    UnsupportedMime(String),
+    #[error("invalid data URL")]
+    InvalidDataUrl,
+    #[error("base64 image payload is invalid: {0}")]
+    InvalidBase64(#[from] base64::DecodeError),
+    #[error("image decode/encode failed: {0}")]
+    Image(#[from] image::ImageError),
+    #[error("grid dimensions must be greater than zero")]
+    InvalidGrid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridCellRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitGridResult {
+    pub rows: u32,
+    pub cols: u32,
+    pub cells: Vec<GridCellRect>,
+    pub images: Vec<String>,
+}
+
+pub fn passthrough_inline_image_data_url(value: &str) -> Result<String, MediaTransformError> {
+    let (mime, bytes) = decode_inline_image_data_url(value)?;
+    encode_image_data_url(&bytes, &mime)
+}
+
+pub fn split_inline_image_grid(
+    value: &str,
+    rows: u32,
+    cols: u32,
+    target_count: Option<usize>,
+) -> Result<SplitGridResult, MediaTransformError> {
+    if rows == 0 || cols == 0 {
+        return Err(MediaTransformError::InvalidGrid);
+    }
+    let (_mime, bytes) = decode_inline_image_data_url(value)?;
+    let image = image::load_from_memory(&bytes)?;
+    let cells = grid_cells(image.width(), image.height(), rows, cols);
+    let limit = target_count.unwrap_or(cells.len()).min(cells.len());
+    let mut images = Vec::with_capacity(limit);
+
+    for cell in cells.iter().take(limit) {
+        let cropped = crop_image_cell(&image, *cell);
+        images.push(encode_png_data_url(&cropped)?);
+    }
+
+    Ok(SplitGridResult {
+        rows,
+        cols,
+        cells,
+        images,
+    })
+}
+
+fn decode_inline_image_data_url(value: &str) -> Result<(String, Vec<u8>), MediaTransformError> {
+    let uri = value.trim();
+    if !uri.starts_with("data:") {
+        return Err(MediaTransformError::UnsupportedUri(truncate_middle(
+            uri, 72,
+        )));
+    }
+    let parts = data_url_parts(uri).ok_or(MediaTransformError::InvalidDataUrl)?;
+    let mime = parts.mime.to_ascii_lowercase();
+    if !mime.starts_with("image/") {
+        return Err(MediaTransformError::UnsupportedMime(parts.mime.to_string()));
+    }
+    if !matches!(
+        mime.as_str(),
+        "image/png" | "image/jpeg" | "image/jpg" | "image/webp"
+    ) {
+        return Err(MediaTransformError::UnsupportedMime(parts.mime.to_string()));
+    }
+
+    let bytes = if parts.is_base64 {
+        general_purpose::STANDARD.decode(parts.payload.as_bytes())?
+    } else {
+        parts.payload.as_bytes().to_vec()
+    };
+    Ok((mime, bytes))
+}
+
+fn encode_image_data_url(bytes: &[u8], source_mime: &str) -> Result<String, MediaTransformError> {
+    let image = image::load_from_memory(bytes)?;
+    if source_mime == "image/jpeg" || source_mime == "image/jpg" {
+        return encode_jpeg_data_url(&image);
+    }
+    if source_mime == "image/webp" {
+        return encode_webp_data_url(&image);
+    }
+    encode_png_data_url(&image)
+}
+
+fn encode_png_data_url(image: &DynamicImage) -> Result<String, MediaTransformError> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, ImageFormat::Png)?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(cursor.into_inner())
+    ))
+}
+
+fn encode_jpeg_data_url(image: &DynamicImage) -> Result<String, MediaTransformError> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, ImageFormat::Jpeg)?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        general_purpose::STANDARD.encode(cursor.into_inner())
+    ))
+}
+
+fn encode_webp_data_url(image: &DynamicImage) -> Result<String, MediaTransformError> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, ImageFormat::WebP)?;
+    Ok(format!(
+        "data:image/webp;base64,{}",
+        general_purpose::STANDARD.encode(cursor.into_inner())
+    ))
+}
+
+fn grid_cells(width: u32, height: u32, rows: u32, cols: u32) -> Vec<GridCellRect> {
+    let mut cells = Vec::with_capacity(rows.saturating_mul(cols) as usize);
+    for row in 0..rows {
+        let y0 = row.saturating_mul(height) / rows;
+        let y1 = (row + 1).saturating_mul(height) / rows;
+        for col in 0..cols {
+            let x0 = col.saturating_mul(width) / cols;
+            let x1 = (col + 1).saturating_mul(width) / cols;
+            cells.push(GridCellRect {
+                x: x0,
+                y: y0,
+                width: x1.saturating_sub(x0),
+                height: y1.saturating_sub(y0),
+            });
+        }
+    }
+    cells
+}
+
+fn crop_image_cell(image: &DynamicImage, cell: GridCellRect) -> DynamicImage {
+    image.crop_imm(cell.x, cell.y, cell.width, cell.height)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -328,9 +488,9 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
         NodeType::Annotation => profile(
             node_type,
             vec![MediaKind::Image],
-            MediaSupportLevel::PreviewOnly,
-            MediaSupportLevel::PreviewOnly,
-            "Current executor passes image references through; drawing tools need a canvas adapter.",
+            MediaSupportLevel::Ready,
+            MediaSupportLevel::Ready,
+            "Local executor preserves annotation pass-through image references; drawing tools still need a canvas adapter.",
         ),
         NodeType::NanoBanana => profile(
             node_type,
@@ -363,16 +523,16 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
         NodeType::SplitGrid => profile(
             node_type,
             vec![MediaKind::Image],
-            MediaSupportLevel::AdapterRequired,
-            MediaSupportLevel::AdapterRequired,
-            "Split-grid image processing needs deterministic transform implementation.",
+            MediaSupportLevel::Ready,
+            MediaSupportLevel::Ready,
+            "Local executor can split inline PNG/JPEG/WebP data URLs into deterministic PNG grid cells; project refs need storage hydration before transform.",
         ),
         NodeType::ImageCompare => profile(
             node_type,
             vec![MediaKind::Image],
-            MediaSupportLevel::PreviewOnly,
-            MediaSupportLevel::PreviewOnly,
-            "Image compare metadata is executable; richer visual comparison remains UI work.",
+            MediaSupportLevel::Ready,
+            MediaSupportLevel::Ready,
+            "Local executor resolves comparison image metadata; richer slider visualization remains UI work.",
         ),
         NodeType::VideoStitch => profile(
             node_type,
@@ -1053,5 +1213,50 @@ mod tests {
                 .iter()
                 .any(|preview| preview.kind == MediaKind::Model3d)
         );
+    }
+
+    #[test]
+    fn inline_image_passthrough_validates_and_reencodes_png() {
+        let tiny = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+        let output = passthrough_inline_image_data_url(tiny).expect("png re-encodes");
+
+        assert!(output.starts_with("data:image/png;base64,"));
+        assert!(output.len() > "data:image/png;base64,".len());
+    }
+
+    #[test]
+    fn split_inline_image_grid_returns_cells_and_data_urls() {
+        let tiny = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP4z8DwHwyBNBAw/AcAR8oI+ItOQ4UAAAAASUVORK5CYII=";
+
+        let result = split_inline_image_grid(tiny, 2, 2, Some(3)).expect("grid splits");
+
+        assert_eq!(result.rows, 2);
+        assert_eq!(result.cols, 2);
+        assert_eq!(result.cells.len(), 4);
+        assert_eq!(result.images.len(), 3);
+        assert!(
+            result
+                .images
+                .iter()
+                .all(|image| image.starts_with("data:image/png;base64,"))
+        );
+        assert_eq!(
+            result.cells[0],
+            GridCellRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+        );
+    }
+
+    #[test]
+    fn split_inline_image_grid_rejects_project_refs_until_storage_adapter_hydrates() {
+        let err = split_inline_image_grid("gemed-media://media/image.png", 2, 2, None)
+            .expect_err("project refs are not directly transformable");
+
+        assert!(err.to_string().contains("only inline image data URLs"));
     }
 }

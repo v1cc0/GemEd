@@ -297,7 +297,9 @@ fn source_output(
         NodeType::ImageInput => string_field(&source.data, "image").map(image_output),
         NodeType::VideoInput => string_field(&source.data, "video").map(video_output),
         NodeType::AudioInput => string_field(&source.data, "audioFile").map(audio_output),
-        NodeType::Annotation => string_field(&source.data, "outputImage").map(image_output),
+        NodeType::Annotation | NodeType::ImageCompare | NodeType::VideoFrameGrab => {
+            string_field(&source.data, "outputImage").map(image_output)
+        }
         NodeType::NanoBanana => string_field(&source.data, "outputImage").map(image_output),
         NodeType::Generate3d => string_field(&source.data, "output3dUrl").map(model3d_output),
         NodeType::GenerateVideo
@@ -314,16 +316,28 @@ fn source_output(
             .map(text_output),
         NodeType::LlmGenerate => string_field(&source.data, "outputText").map(text_output),
         NodeType::Output => string_field(&source.data, "text").map(text_output),
+        NodeType::SplitGrid => split_grid_output(source, source_handle).map(image_output),
         NodeType::OutputGallery
-        | NodeType::ImageCompare
-        | NodeType::SplitGrid
         | NodeType::Router
         | NodeType::Switch
         | NodeType::ConditionalSwitch
         | NodeType::GlbViewer
-        | NodeType::VideoFrameGrab
         | NodeType::Unknown => None,
     }
+}
+
+fn split_grid_output(source: &WorkflowNode, source_handle: Option<&str>) -> Option<String> {
+    let images = string_array_field(&source.data, "images");
+    if images.is_empty() {
+        return None;
+    }
+    if let Some(index) = source_handle
+        .and_then(|handle| handle.strip_prefix("image-"))
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return images.get(index).cloned();
+    }
+    images.first().cloned()
 }
 
 fn array_output(

@@ -308,6 +308,25 @@ fn Header(
                     "Media Sample"
                 }
                 button {
+                    class: "action",
+                    onclick: move |_| {
+                        let next = WorkflowFile::media_transform_example();
+                        match next.to_pretty_json() {
+                            Ok(json) => {
+                                workflow.set(next);
+                                json_text.set(json);
+                                execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
+                                connection_draft.set(None);
+                                message.set(Message::ok("Loaded built-in media transform sample. Run Local to split the inline image grid."));
+                            }
+                            Err(err) => message.set(Message::err(format!("Failed to serialize media transform workflow: {err}"))),
+                        }
+                    },
+                    "Transform Sample"
+                }
+                button {
                     class: "action primary",
                     onclick: move |_| match WorkflowFile::from_json_str(&json_text.read()) {
                         Ok(parsed) => {
