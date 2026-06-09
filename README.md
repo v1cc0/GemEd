@@ -20,7 +20,7 @@ Implemented now:
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes, including an offline LLM Provider Sample that exercises Gemini/OpenAI/Anthropic routing without real API calls
 - Optional desktop LLM HTTP backends behind the `providers-http` feature: Gemini GenerateContent via `GEMINI_API_KEY`, OpenAI Responses via `OPENAI_API_KEY`, and Anthropic Messages via `ANTHROPIC_API_KEY`; normal builds keep network/provider calls out unless explicitly enabled
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
-- Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
+- Provider settings panel with platform/mock defaults, per-provider mode toggles, editable default model/base URL fields, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
 - Provider secret setup/status hints that tell users which desktop environment variable or web backend binding to configure without writing API keys into workflow/provider JSON
 - Fake-transport coverage for the opt-in Gemini, OpenAI, and Anthropic LLM backends so request mapping, secret/header construction, response parsing, and transport errors are tested without real API calls
 - Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar; inline image compare metrics and split-grid PNG/JPEG/WebP transforms now have first Rust adapters, split-grid can generate legacy child ImageInput/Prompt/Generate sets, and desktop project load hydrates saved image refs back into transformable data URLs
@@ -79,7 +79,7 @@ GEMINI_API_KEY=... OPENAI_API_KEY=... ANTHROPIC_API_KEY=... dx serve --desktop -
 
 In the app, set Gemini, OpenAI, or Anthropic to the platform/env mode in Provider Settings and run an LLM node with provider `gemini`, `openai`, or `anthropic`. Gemini defaults to GenerateContent with `gemini-3.5-flash`; Anthropic defaults to Messages API with `claude-sonnet-4-6` when the workflow does not provide a concrete model. The regular desktop and web commands do not include live provider HTTP clients.
 
-For deterministic offline provider verification, click `Provider Sample`, click `Mock Defaults` in Provider Settings, then click `Run Providers`. The three output nodes should receive mock text for `gemini`, `openai`, and `anthropic`. For opt-in live desktop LLM verification, launch with `--features desktop,providers-http`, set the same providers to `Env`, export the matching environment variables, and run the same sample.
+For deterministic offline provider verification, click `Provider Sample`, click `Mock Defaults` in Provider Settings, then click `Run Providers`. The three output nodes should receive mock text for `gemini`, `openai`, and `anthropic`. For opt-in live desktop LLM verification, launch with `--features desktop,providers-http`, set the same providers to `Env`, export the matching environment variables, optionally edit default model/base URL fields, and run the same sample. Provider config persists model/base URL labels only; raw API keys stay in the process environment.
 
 For release-style build artifacts:
 

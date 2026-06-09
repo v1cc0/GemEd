@@ -44,7 +44,7 @@ const APP_CSS: &str = r#"
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #1f2a44 0, #0b1020 36rem); }
-button, textarea { font: inherit; }
+button, textarea, input { font: inherit; }
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 .header { min-height: 4.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem 1.5rem; border-bottom: 1px solid rgba(148, 163, 184, .18); background: rgba(11, 16, 32, .78); backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: baseline; gap: .75rem; }
@@ -193,6 +193,11 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .provider-status.missing { color: #fde68a; border-color: rgba(250, 204, 21, .28); background: rgba(113, 63, 18, .28); }
 .provider-status.disabled { color: #cbd5e1; border-color: rgba(148, 163, 184, .2); background: rgba(51, 65, 85, .36); }
 .provider-actions { display: flex; gap: .28rem; flex-wrap: wrap; justify-content: flex-end; }
+.provider-edit { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin-top: .48rem; }
+.provider-edit label { display: grid; gap: .2rem; color: #98a9c7; font-size: .68rem; font-weight: 700; }
+.provider-input { width: 100%; border: 1px solid rgba(148, 163, 184, .18); border-radius: .55rem; padding: .36rem .45rem; color: #e5ecff; background: rgba(2, 6, 23, .54); outline: none; font-size: .72rem; }
+.provider-input:focus { border-color: rgba(125, 211, 252, .5); box-shadow: 0 0 0 2px rgba(14, 165, 233, .14); }
+.provider-input::placeholder { color: #64748b; }
 .secret-guide { border: 1px dashed rgba(196, 181, 253, .34); border-radius: .75rem; padding: .58rem .65rem; color: #ddd6fe; background: rgba(109, 40, 217, .12); font-size: .76rem; line-height: 1.4; }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
@@ -1212,6 +1217,10 @@ fn Sidebar(
                             let name = provider.id.display_name();
                             let mode = provider_runtime_mode_label(provider.runtime_mode);
                             let source = provider.secret_source.public_label();
+                            let model_id = provider.id.clone();
+                            let base_url_id = provider.id.clone();
+                            let default_model = provider.default_model.clone().unwrap_or_default();
+                            let base_url = provider.base_url.clone().unwrap_or_default();
                             let capabilities = provider_capability_list(&provider.capabilities);
                             let secret_hint = provider_secret_setup_hint(provider);
                             let can_show_setup = provider.runtime_mode != ProviderRuntimeMode::Mock
@@ -1277,6 +1286,42 @@ fn Sidebar(
                                                 );
                                             },
                                             "Off"
+                                        }
+                                    }
+                                    div { class: "provider-edit",
+                                        label {
+                                            "Default model"
+                                            input {
+                                                class: "provider-input",
+                                                r#type: "text",
+                                                value: "{default_model}",
+                                                placeholder: provider_default_model_placeholder(&provider_id),
+                                                oninput: move |event| {
+                                                    set_provider_default_model(
+                                                        &mut provider_config,
+                                                        model_id.clone(),
+                                                        &event.value(),
+                                                        &mut message,
+                                                    );
+                                                },
+                                            }
+                                        }
+                                        label {
+                                            "Base URL / endpoint"
+                                            input {
+                                                class: "provider-input",
+                                                r#type: "url",
+                                                value: "{base_url}",
+                                                placeholder: provider_base_url_placeholder(&provider_id),
+                                                oninput: move |event| {
+                                                    set_provider_base_url(
+                                                        &mut provider_config,
+                                                        base_url_id.clone(),
+                                                        &event.value(),
+                                                        &mut message,
+                                                    );
+                                                },
+                                            }
                                         }
                                     }
                                 }
@@ -3211,11 +3256,20 @@ fn set_provider_config_mode(
     message: &mut Signal<Message>,
 ) {
     let mut next = provider_config.read().clone();
-    let replacement = match mode {
+    let existing_customization = next
+        .providers
+        .iter()
+        .find(|config| config.id == id)
+        .map(|config| (config.default_model.clone(), config.base_url.clone()));
+    let mut replacement = match mode {
         ProviderSettingsMode::Mock => ProviderConfig::mock(id.clone()),
         ProviderSettingsMode::DesktopEnv => platform_env_provider_config(id.clone()),
         ProviderSettingsMode::Disabled => ProviderConfig::disabled(id.clone()),
     };
+    if let Some((default_model, base_url)) = existing_customization {
+        replacement.default_model = default_model;
+        replacement.base_url = base_url;
+    }
     let display_name = replacement.id.display_name();
     let mode_label = provider_runtime_mode_label(replacement.runtime_mode);
 
@@ -3228,6 +3282,119 @@ fn set_provider_config_mode(
     message.set(Message::ok(format!(
         "Set `{display_name}` provider mode to {mode_label}."
     )));
+}
+
+fn set_provider_default_model(
+    provider_config: &mut Signal<ProviderConfigSet>,
+    id: ProviderId,
+    value: &str,
+    message: &mut Signal<Message>,
+) {
+    let sanitized = sanitize_optional_provider_text(value);
+    let label = sanitized
+        .clone()
+        .unwrap_or_else(|| "provider default".to_string());
+    update_provider_config(provider_config, id.clone(), |config| {
+        config.default_model = sanitized;
+    });
+    message.set(Message::ok(format!(
+        "Set `{}` default model to `{label}`.",
+        id.display_name()
+    )));
+}
+
+fn set_provider_base_url(
+    provider_config: &mut Signal<ProviderConfigSet>,
+    id: ProviderId,
+    value: &str,
+    message: &mut Signal<Message>,
+) {
+    match sanitize_optional_provider_base_url(value) {
+        Ok(base_url) => {
+            let label = base_url
+                .clone()
+                .unwrap_or_else(|| "provider default".to_string());
+            update_provider_config(provider_config, id.clone(), |config| {
+                config.base_url = base_url;
+            });
+            message.set(Message::ok(format!(
+                "Set `{}` base URL to `{label}`.",
+                id.display_name()
+            )));
+        }
+        Err(err) => message.set(Message::err(err)),
+    }
+}
+
+fn update_provider_config(
+    provider_config: &mut Signal<ProviderConfigSet>,
+    id: ProviderId,
+    update: impl FnOnce(&mut ProviderConfig),
+) {
+    let mut next = provider_config.read().clone();
+    if let Some(config) = next.providers.iter_mut().find(|config| config.id == id) {
+        update(config);
+    } else {
+        let mut config = ProviderConfig::mock(id);
+        update(&mut config);
+        next.providers.push(config);
+    }
+    provider_config.set(next);
+}
+
+fn sanitize_optional_provider_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn sanitize_optional_provider_base_url(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !(value.starts_with("https://") || value.starts_with("http://")) {
+        return Err("Provider base URL must start with http:// or https://.".to_string());
+    }
+    let authority = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        return Err("Provider base URL needs a host.".to_string());
+    }
+    if authority.contains('@') {
+        return Err(
+            "Provider base URL must not include username/password credentials.".to_string(),
+        );
+    }
+    if value.contains('?') || value.contains('#') {
+        return Err("Provider base URL must not include query strings or fragments.".to_string());
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn provider_default_model_placeholder(id: &ProviderId) -> &'static str {
+    match id {
+        ProviderId::Gemini | ProviderId::Google => "gemini-3.5-flash",
+        ProviderId::OpenAi => "gpt-5.5",
+        ProviderId::Anthropic => "claude-sonnet-4-6",
+        ProviderId::Mock => "mock-llm",
+        _ => "provider default",
+    }
+}
+
+fn provider_base_url_placeholder(id: &ProviderId) -> &'static str {
+    match id {
+        ProviderId::Gemini | ProviderId::Google => {
+            "https://generativelanguage.googleapis.com/v1beta"
+        }
+        ProviderId::OpenAi => "https://api.openai.com/v1/responses",
+        ProviderId::Anthropic => "https://api.anthropic.com/v1/messages",
+        _ => "https://provider.example/api",
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -3766,7 +3933,9 @@ mod tests {
         CanvasRect, CopyStatus, copy_media_uri_script, ensure_json_extension, media_error_message,
         media_overlay_from_preview, media_preview_kind_class, node_ids_intersecting_rect,
         platform_provider_secret_setup_message, provider_capability_list,
-        provider_secret_setup_hint, workflow_json_filename,
+        provider_default_model_placeholder, provider_secret_setup_hint,
+        sanitize_optional_provider_base_url, sanitize_optional_provider_text,
+        workflow_json_filename,
     };
     use gemed_core::{Position, WorkflowFile};
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
@@ -3853,6 +4022,38 @@ mod tests {
 
         assert!(hint.contains("OPENAI_API_KEY"));
         assert!(!hint.contains("sk-live-secret"));
+    }
+
+    #[test]
+    fn provider_model_and_base_url_text_is_sanitized_without_secrets() {
+        assert_eq!(
+            sanitize_optional_provider_text("  gemini-test  ").as_deref(),
+            Some("gemini-test")
+        );
+        assert_eq!(sanitize_optional_provider_text("  "), None);
+        assert_eq!(
+            sanitize_optional_provider_base_url(" https://api.example.test/v1/ ").unwrap(),
+            Some("https://api.example.test/v1".to_string())
+        );
+        assert!(sanitize_optional_provider_base_url("api.example.test").is_err());
+        assert!(sanitize_optional_provider_base_url("https://token@example.test").is_err());
+        assert!(sanitize_optional_provider_base_url("https://example.test?key=secret").is_err());
+    }
+
+    #[test]
+    fn provider_default_model_placeholders_cover_live_llm_backends() {
+        assert_eq!(
+            provider_default_model_placeholder(&ProviderId::Gemini),
+            "gemini-3.5-flash"
+        );
+        assert_eq!(
+            provider_default_model_placeholder(&ProviderId::OpenAi),
+            "gpt-5.5"
+        );
+        assert_eq!(
+            provider_default_model_placeholder(&ProviderId::Anthropic),
+            "claude-sonnet-4-6"
+        );
     }
 
     #[test]
