@@ -335,6 +335,25 @@ fn Header(
                 button {
                     class: "action",
                     onclick: move |_| {
+                        let next = WorkflowFile::video_frame_grab_example();
+                        match next.to_pretty_json() {
+                            Ok(json) => {
+                                workflow.set(next);
+                                json_text.set(json);
+                                execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
+                                connection_draft.set(None);
+                                message.set(Message::ok("Loaded built-in video frame-grab sample. Run Local to plan source/seek metadata; true PNG capture still needs a platform decode adapter."));
+                            }
+                            Err(err) => message.set(Message::err(format!("Failed to serialize video frame sample workflow: {err}"))),
+                        }
+                    },
+                    "Frame Sample"
+                }
+                button {
+                    class: "action",
+                    onclick: move |_| {
                         let next = WorkflowFile::llm_provider_example();
                         match next.to_pretty_json() {
                             Ok(json) => {
@@ -4204,6 +4223,40 @@ mod tests {
                 "{node_id} should receive deterministic mock provider text"
             );
         }
+    }
+
+    #[test]
+    fn video_frame_grab_sample_runs_as_planning_boundary() {
+        let workflow = WorkflowFile::video_frame_grab_example();
+        let result = gemed_executor::execute_simple_workflow(&workflow)
+            .expect("video frame sample planning runs");
+        let grab = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "frame_grab")
+            .expect("frame grab node exists");
+
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+        assert_eq!(
+            grab.data
+                .get("__mediaAdapter")
+                .and_then(serde_json::Value::as_str),
+            Some("rust-video-frame-grab-plan")
+        );
+        assert!(
+            grab.data
+                .get("frameGrabPlan")
+                .and_then(|plan| plan.get("requiresDecodeAdapter"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        );
+        assert!(
+            grab.data
+                .get("outputImage")
+                .is_some_and(serde_json::Value::is_null)
+        );
     }
 
     #[cfg(feature = "desktop")]

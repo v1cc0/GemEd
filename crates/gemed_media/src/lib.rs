@@ -15,6 +15,12 @@ pub enum MediaTransformError {
     UnsupportedUri(String),
     #[error("unsupported inline image media type `{0}`")]
     UnsupportedMime(String),
+    #[error(
+        "unsupported video URI `{0}`; current frame-grab adapter boundary accepts inline video data URLs, blob/http(s) URLs, project media refs, or app-relative/static paths"
+    )]
+    UnsupportedVideoUri(String),
+    #[error("unsupported inline video media type `{0}`")]
+    UnsupportedVideoMime(String),
     #[error("invalid data URL")]
     InvalidDataUrl,
     #[error("base64 image payload is invalid: {0}")]
@@ -71,6 +77,64 @@ pub struct InlineImageCompareResult {
     pub exact_match: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub difference: Option<InlineImageDifference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VideoFramePosition {
+    First,
+    Last,
+}
+
+impl VideoFramePosition {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value.trim() {
+            "first" => Some(Self::First),
+            "last" => Some(Self::Last),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Last => "last",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaUriKind {
+    InlineData,
+    Blob,
+    Http,
+    ProjectReference,
+    StaticPath,
+    RelativePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUriMetadata {
+    pub uri_kind: MediaUriKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_length: Option<usize>,
+    pub renderable_in_webview: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFrameGrabPlan {
+    pub source: VideoUriMetadata,
+    pub frame_position: VideoFramePosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_seek_seconds: Option<f64>,
+    pub seek_requires_duration: bool,
+    pub output_mime: String,
+    pub requires_decode_adapter: bool,
 }
 
 pub fn passthrough_inline_image_data_url(value: &str) -> Result<String, MediaTransformError> {
@@ -130,6 +194,103 @@ pub fn split_inline_image_grid(
         cells,
         images,
     })
+}
+
+pub fn plan_video_frame_grab(
+    value: &str,
+    frame_position: VideoFramePosition,
+    known_duration_seconds: Option<f64>,
+) -> Result<VideoFrameGrabPlan, MediaTransformError> {
+    let source = inspect_video_uri(value)?;
+    let requested_seek_seconds = match frame_position {
+        VideoFramePosition::First => Some(0.001),
+        VideoFramePosition::Last => known_duration_seconds
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .map(|duration| (duration - 0.1).max(0.0)),
+    };
+    Ok(VideoFrameGrabPlan {
+        source,
+        frame_position,
+        requested_seek_seconds,
+        seek_requires_duration: frame_position == VideoFramePosition::Last
+            && requested_seek_seconds.is_none(),
+        output_mime: "image/png".to_string(),
+        requires_decode_adapter: true,
+    })
+}
+
+fn inspect_video_uri(value: &str) -> Result<VideoUriMetadata, MediaTransformError> {
+    let uri = value.trim();
+    if uri.is_empty() {
+        return Err(MediaTransformError::UnsupportedVideoUri(
+            "<empty>".to_string(),
+        ));
+    }
+
+    if let Some(parts) = data_url_parts(uri) {
+        let mime = parts.mime.trim().to_ascii_lowercase();
+        if !mime.starts_with("video/") {
+            return Err(MediaTransformError::UnsupportedVideoMime(
+                parts.mime.to_string(),
+            ));
+        }
+        let byte_length = if parts.is_base64 {
+            base64_decoded_len(parts.payload)
+        } else {
+            parts.payload.len()
+        };
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::InlineData,
+            mime: Some(mime),
+            byte_length: Some(byte_length),
+            renderable_in_webview: true,
+        });
+    }
+
+    if uri.starts_with("blob:") {
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::Blob,
+            mime: video_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::Http,
+            mime: video_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("gemed-media://") {
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::ProjectReference,
+            mime: video_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: false,
+        });
+    }
+    if uri.starts_with('/') {
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::StaticPath,
+            mime: video_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("./") || uri.starts_with("../") {
+        return Ok(VideoUriMetadata {
+            uri_kind: MediaUriKind::RelativePath,
+            mime: video_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+
+    Err(MediaTransformError::UnsupportedVideoUri(truncate_middle(
+        uri, 72,
+    )))
 }
 
 struct DecodedInlineImage {
@@ -672,7 +833,7 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
             vec![MediaKind::Video, MediaKind::Image],
             MediaSupportLevel::AdapterRequired,
             MediaSupportLevel::AdapterRequired,
-            "Frame grab needs video decode and image capture adapters.",
+            "Local executor now plans frame-grab source/seek metadata; actual video decode and PNG capture still need browser/native adapters.",
         ),
         NodeType::GlbViewer => profile(
             node_type,
@@ -747,6 +908,12 @@ const SINGLE_MEDIA_FIELDS: &[MediaFieldSpec] = &[
         ref_field: Some("videoRef"),
         kind: MediaKind::Video,
         label: "Video",
+    },
+    MediaFieldSpec {
+        field: "sourceVideo",
+        ref_field: Some("sourceVideoRef"),
+        kind: MediaKind::Video,
+        label: "Source video",
     },
     MediaFieldSpec {
         field: "sourceImage",
@@ -1067,6 +1234,17 @@ fn extension_for_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
+fn video_mime_from_uri(uri: &str) -> Option<String> {
+    let extension = extension_from_uri(uri)?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
 fn extension_from_uri(uri: &str) -> Option<&str> {
     let path = uri
         .split(['?', '#'])
@@ -1118,6 +1296,23 @@ mod tests {
     }
 
     #[test]
+    fn video_frame_grab_profile_mentions_planning_boundary_without_ready_claim() {
+        let profile = media_profile_for_node_type(&NodeType::VideoFrameGrab).unwrap();
+
+        assert_eq!(
+            profile.media_kinds,
+            vec![MediaKind::Video, MediaKind::Image]
+        );
+        assert!(profile.needs_adapter());
+        assert!(
+            profile
+                .notes
+                .contains("plans frame-grab source/seek metadata")
+        );
+        assert!(profile.notes.contains("still need browser/native adapters"));
+    }
+
+    #[test]
     fn prompt_is_not_media_profile() {
         assert_eq!(media_profile_for_node_type(&NodeType::Prompt), None);
     }
@@ -1155,6 +1350,66 @@ mod tests {
         assert_eq!(summary.ready_count, 1);
         assert_eq!(summary.adapter_required_count, 1);
         assert!(summary.sentence().contains("2 media node"));
+    }
+
+    #[test]
+    fn video_frame_grab_plan_accepts_inline_video_without_decoding() {
+        let plan = plan_video_frame_grab(
+            "data:video/mp4;base64,AAAA",
+            VideoFramePosition::First,
+            None,
+        )
+        .expect("inline video URI can be planned");
+
+        assert_eq!(plan.source.uri_kind, MediaUriKind::InlineData);
+        assert_eq!(plan.source.mime.as_deref(), Some("video/mp4"));
+        assert_eq!(plan.source.byte_length, Some(3));
+        assert!(plan.source.renderable_in_webview);
+        assert_eq!(plan.requested_seek_seconds, Some(0.001));
+        assert!(!plan.seek_requires_duration);
+        assert_eq!(plan.output_mime, "image/png");
+        assert!(plan.requires_decode_adapter);
+    }
+
+    #[test]
+    fn video_frame_grab_plan_records_last_frame_duration_gap() {
+        let unresolved = plan_video_frame_grab(
+            "gemed-media://media/clip.webm",
+            VideoFramePosition::Last,
+            None,
+        )
+        .expect("project video ref can be planned");
+        let resolved = plan_video_frame_grab(
+            "https://example.invalid/clip.mp4?download=1",
+            VideoFramePosition::Last,
+            Some(3.0),
+        )
+        .expect("http video URI can be planned with duration");
+
+        assert_eq!(unresolved.source.uri_kind, MediaUriKind::ProjectReference);
+        assert_eq!(unresolved.source.mime.as_deref(), Some("video/webm"));
+        assert!(!unresolved.source.renderable_in_webview);
+        assert_eq!(unresolved.requested_seek_seconds, None);
+        assert!(unresolved.seek_requires_duration);
+        assert_eq!(resolved.source.uri_kind, MediaUriKind::Http);
+        assert_eq!(resolved.source.mime.as_deref(), Some("video/mp4"));
+        assert_eq!(resolved.requested_seek_seconds, Some(2.9));
+        assert!(!resolved.seek_requires_duration);
+    }
+
+    #[test]
+    fn video_frame_grab_plan_rejects_non_video_data_urls() {
+        let err = plan_video_frame_grab(
+            "data:image/png;base64,AAAA",
+            VideoFramePosition::First,
+            None,
+        )
+        .expect_err("image data URL is not a video frame source");
+
+        assert!(
+            err.to_string()
+                .contains("unsupported inline video media type")
+        );
     }
 
     #[test]
@@ -1284,6 +1539,29 @@ mod tests {
             previews[0].uri_hint(),
             "https://example.invalid/media/rendered.webm?token=1"
         );
+    }
+
+    #[test]
+    fn media_preview_reports_video_frame_grab_source_video() {
+        let node = WorkflowNode::new(
+            "frame",
+            NodeType::VideoFrameGrab,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "label": "Frame Grab",
+                "sourceVideo": "data:video/mp4;base64,AAAA",
+                "outputImage": null
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].kind, MediaKind::Video);
+        assert_eq!(previews[0].label, "Frame Grab");
+        assert_eq!(previews[0].source_field, "sourceVideo");
+        assert_eq!(previews[0].inline_mime().as_deref(), Some("video/mp4"));
+        assert_eq!(previews[0].download_filename(), "frame-grab.mp4");
     }
 
     #[test]

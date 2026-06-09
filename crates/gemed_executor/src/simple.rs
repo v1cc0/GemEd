@@ -4,7 +4,8 @@ use crate::graph::{
 };
 use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode, is_node_in_locked_group};
 use gemed_media::{
-    InlineImageCompareResult, compare_inline_images, inspect_inline_image, split_inline_image_grid,
+    InlineImageCompareResult, VideoFramePosition, compare_inline_images, inspect_inline_image,
+    plan_video_frame_grab, split_inline_image_grid,
 };
 use gemed_providers::{
     AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
@@ -250,13 +251,12 @@ async fn execute_node(
         NodeType::Generate3d => execute_3d_generation(node, inputs, providers).await,
         NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers).await,
         NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers).await,
-        NodeType::VideoStitch
-        | NodeType::EaseCurve
-        | NodeType::VideoTrim
-        | NodeType::VideoFrameGrab
-        | NodeType::GlbViewer => NodeOutcome::skipped(
-            "Advanced media execution is not wired in this local simple executor yet.",
-        ),
+        NodeType::VideoFrameGrab => execute_video_frame_grab(node, inputs),
+        NodeType::VideoStitch | NodeType::EaseCurve | NodeType::VideoTrim | NodeType::GlbViewer => {
+            NodeOutcome::skipped(
+                "Advanced media execution is not wired in this local simple executor yet.",
+            )
+        }
         NodeType::Unknown => NodeOutcome::skipped("Unknown node type skipped."),
     }
 }
@@ -622,6 +622,68 @@ fn execute_split_grid(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutc
         }
         Err(err) => NodeOutcome::error(format!("Split grid failed: {err}"), IndexMap::new()),
     }
+}
+
+fn execute_video_frame_grab(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
+    let source_video = inputs
+        .videos
+        .first()
+        .cloned()
+        .or_else(|| string_field(&node.data, "sourceVideo"))
+        .or_else(|| string_field(&node.data, "video"));
+    let Some(source_video) = source_video else {
+        return NodeOutcome::error(
+            "Video frame grab requires a connected source video.".to_string(),
+            reset_video_frame_grab_outputs(),
+        );
+    };
+
+    let frame_position = string_field(&node.data, "framePosition")
+        .as_deref()
+        .and_then(VideoFramePosition::from_wire)
+        .unwrap_or(VideoFramePosition::First);
+    let duration = number_field(&node.data, "duration");
+
+    match plan_video_frame_grab(&source_video, frame_position, duration) {
+        Ok(plan) => {
+            let seek_requires_duration = plan.seek_requires_duration;
+            let mut updates = IndexMap::new();
+            updates.insert("sourceVideo".to_string(), json!(source_video));
+            updates.insert("sourceVideoRef".to_string(), Value::Null);
+            updates.insert("framePosition".to_string(), json!(frame_position.as_str()));
+            updates.insert("outputImage".to_string(), Value::Null);
+            updates.insert("outputImageRef".to_string(), Value::Null);
+            updates.insert("frameGrabPlan".to_string(), json!(plan));
+            updates.insert(
+                "__mediaAdapter".to_string(),
+                json!("rust-video-frame-grab-plan"),
+            );
+
+            let message = if seek_requires_duration {
+                "Video frame grab adapter boundary planned; last-frame extraction still needs a decode adapter with duration metadata."
+            } else {
+                "Video frame grab adapter boundary planned; decode/canvas capture remains platform adapter work."
+            };
+            NodeOutcome::complete(message, updates)
+        }
+        Err(err) => NodeOutcome::error(format!("Video frame grab planning failed: {err}"), {
+            let mut updates = reset_video_frame_grab_outputs();
+            updates.insert("sourceVideo".to_string(), json!(source_video));
+            updates.insert(
+                "__mediaAdapter".to_string(),
+                json!("rust-video-frame-grab-plan-unavailable"),
+            );
+            updates
+        }),
+    }
+}
+
+fn reset_video_frame_grab_outputs() -> IndexMap<String, Value> {
+    IndexMap::from([
+        ("outputImage".to_string(), Value::Null),
+        ("outputImageRef".to_string(), Value::Null),
+        ("frameGrabPlan".to_string(), Value::Null),
+    ])
 }
 
 fn execute_output(inputs: &ConnectedInputs) -> NodeOutcome {
@@ -1419,6 +1481,129 @@ mod tests {
                 .get("error")
                 .and_then(Value::as_str)
                 .is_some_and(|message| message.contains("only inline image data URLs"))
+        );
+        assert_eq!(result.report.error_count(), 1);
+    }
+
+    #[test]
+    fn video_frame_grab_records_adapter_plan_without_fake_image_output() {
+        let source = "data:video/mp4;base64,AAAA";
+        let workflow = WorkflowFile {
+            name: "frame grab plan".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "video",
+                    NodeType::VideoInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"video": source}),
+                ),
+                WorkflowNode::new(
+                    "grab",
+                    NodeType::VideoFrameGrab,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"framePosition": "first", "outputImage": "stale"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles("e1", "video", "grab", "video", "video"),
+                WorkflowEdge::with_handles("e2", "grab", "output", "image", "image"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("frame grab plan executes");
+        let grab = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "grab")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        let plan = grab
+            .data
+            .get("frameGrabPlan")
+            .expect("frame grab plan is stored");
+
+        assert_eq!(
+            grab.data.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            grab.data.get("sourceVideo").and_then(Value::as_str),
+            Some(source)
+        );
+        assert!(grab.data.get("outputImage").is_some_and(Value::is_null));
+        assert_eq!(
+            grab.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-video-frame-grab-plan")
+        );
+        assert_eq!(
+            plan.get("source")
+                .and_then(|source| source.get("uriKind"))
+                .and_then(Value::as_str),
+            Some("inlineData")
+        );
+        assert_eq!(
+            plan.get("requestedSeekSeconds").and_then(Value::as_f64),
+            Some(0.001)
+        );
+        assert_eq!(
+            output.data.get("image").and_then(Value::as_str),
+            None,
+            "no fake frame image should be routed downstream"
+        );
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn video_frame_grab_rejects_non_video_source() {
+        let workflow = WorkflowFile {
+            name: "bad frame grab".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "grab",
+                NodeType::VideoFrameGrab,
+                Position { x: 0.0, y: 0.0 },
+                json!({
+                    "video": "data:image/png;base64,AAAA",
+                    "framePosition": "first"
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("execution records node error");
+        let grab = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "grab")
+            .unwrap();
+
+        assert_eq!(
+            grab.data.get("status").and_then(Value::as_str),
+            Some("error")
+        );
+        assert!(
+            grab.data
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("unsupported inline video media type"))
+        );
+        assert_eq!(
+            grab.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-video-frame-grab-plan-unavailable")
         );
         assert_eq!(result.report.error_count(), 1);
     }

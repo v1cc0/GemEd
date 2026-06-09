@@ -194,6 +194,71 @@ impl WorkflowFile {
         }
     }
 
+    pub fn video_frame_grab_example() -> Self {
+        Self {
+            name: "GemEd Video Frame Grab Sample".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "frame_video",
+                    NodeType::VideoInput,
+                    Position { x: 80.0, y: 140.0 },
+                    serde_json::json!({
+                        "label": "Inline MP4 Source",
+                        "status": "complete",
+                        "video": SAMPLE_MP4_VIDEO_DATA_URL,
+                        "filename": "gemed-preview.mp4",
+                        "duration": 0.12,
+                        "dimensions": { "width": 16, "height": 16 },
+                        "format": "video/mp4"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "frame_grab",
+                    NodeType::VideoFrameGrab,
+                    Position { x: 430.0, y: 120.0 },
+                    serde_json::json!({
+                        "label": "Plan First Frame",
+                        "status": "idle",
+                        "framePosition": "first",
+                        "sourceVideo": null,
+                        "sourceVideoRef": null,
+                        "outputImage": null,
+                        "outputImageRef": null,
+                        "frameGrabPlan": null
+                    }),
+                ),
+                WorkflowNode::new(
+                    "frame_output",
+                    NodeType::Output,
+                    Position { x: 780.0, y: 150.0 },
+                    serde_json::json!({
+                        "label": "Frame Output",
+                        "status": "idle",
+                        "contentType": "image",
+                        "image": null
+                    }),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles(
+                    "edge_frame_video_grab",
+                    "frame_video",
+                    "frame_grab",
+                    "video",
+                    "video",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_frame_grab_output",
+                    "frame_grab",
+                    "frame_output",
+                    "image",
+                    "image",
+                ),
+            ],
+            ..Self::blank()
+        }
+    }
+
     pub fn llm_provider_example() -> Self {
         Self {
             name: "GemEd LLM Provider Sample".to_string(),
@@ -1010,6 +1075,34 @@ mod tests {
 
         let json = workflow.to_pretty_json().expect("serialize media sample");
         let parsed = WorkflowFile::from_json_str(&json).expect("parse media sample");
+        assert_eq!(parsed, workflow);
+    }
+
+    #[test]
+    fn video_frame_grab_sample_workflow_is_valid_and_roundtrips() {
+        let workflow = WorkflowFile::video_frame_grab_example();
+        workflow
+            .validate()
+            .expect("video frame grab sample validates");
+        assert_eq!(workflow.nodes.len(), 3);
+        assert_eq!(workflow.edges.len(), 2);
+        assert!(
+            workflow
+                .nodes
+                .iter()
+                .any(|node| node.node_type == NodeType::VideoFrameGrab)
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.target_handle.as_deref() == Some("video"))
+        );
+
+        let json = workflow
+            .to_pretty_json()
+            .expect("serialize video frame grab sample");
+        let parsed = WorkflowFile::from_json_str(&json).expect("parse video frame grab sample");
         assert_eq!(parsed, workflow);
     }
 

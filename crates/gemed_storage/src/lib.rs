@@ -855,6 +855,7 @@ pub mod desktop {
         ("image", "imageRef"),
         ("audioFile", "audioFileRef"),
         ("video", "videoRef"),
+        ("sourceVideo", "sourceVideoRef"),
         ("sourceImage", "sourceImageRef"),
         ("outputImage", "outputImageRef"),
         ("outputVideo", "outputVideoRef"),
