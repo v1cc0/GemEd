@@ -2,6 +2,8 @@ use gemed_core::{NodeType, WorkflowFile, WorkflowNode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_INLINE_PREVIEW_LIMIT_BYTES: usize = 512 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MediaKind {
@@ -118,6 +120,10 @@ pub struct MediaPreview {
 }
 
 impl MediaPreview {
+    pub fn should_inline_preview(&self) -> bool {
+        self.is_renderable_uri() && !self.is_large_inline()
+    }
+
     pub fn is_renderable_uri(&self) -> bool {
         let uri = self.uri.trim();
         uri.starts_with("data:")
@@ -129,20 +135,62 @@ impl MediaPreview {
             || uri.starts_with("../")
     }
 
+    pub fn is_large_inline(&self) -> bool {
+        self.inline_byte_len()
+            .is_some_and(|bytes| bytes > DEFAULT_INLINE_PREVIEW_LIMIT_BYTES)
+    }
+
+    pub fn inline_mime(&self) -> Option<String> {
+        data_url_parts(&self.uri).map(|parts| parts.mime.to_string())
+    }
+
+    pub fn inline_byte_len(&self) -> Option<usize> {
+        let parts = data_url_parts(&self.uri)?;
+        if parts.is_base64 {
+            Some(base64_decoded_len(parts.payload))
+        } else {
+            Some(parts.payload.len())
+        }
+    }
+
+    pub fn size_hint(&self) -> Option<String> {
+        self.inline_byte_len().map(human_bytes)
+    }
+
+    pub fn download_filename(&self) -> String {
+        let base = sanitize_filename(&self.label)
+            .or_else(|| sanitize_filename(&self.source_field))
+            .unwrap_or_else(|| "gemed-media".to_string());
+        let extension = data_url_parts(&self.uri)
+            .and_then(|parts| extension_for_mime(parts.mime))
+            .or_else(|| extension_from_uri(&self.uri))
+            .unwrap_or_else(|| self.kind.default_extension());
+        format!("{base}.{extension}")
+    }
+
     pub fn uri_hint(&self) -> String {
         let uri = self.uri.trim();
-        if let Some(mime) = uri.strip_prefix("data:").and_then(|value| {
-            value
-                .split_once(';')
-                .map(|(mime, _)| mime)
-                .or_else(|| value.split_once(',').map(|(mime, _)| mime))
-        }) {
-            return format!("inline {mime}");
+        if let Some(parts) = data_url_parts(uri) {
+            return match self.size_hint() {
+                Some(size) => format!("inline {} · {size}", parts.mime),
+                None => format!("inline {}", parts.mime),
+            };
         }
         if uri.starts_with("gemed-media://") {
             return "project media reference".to_string();
         }
         truncate_middle(uri, 72)
+    }
+}
+
+impl MediaKind {
+    fn default_extension(self) -> &'static str {
+        match self {
+            Self::Image => "png",
+            Self::Audio => "wav",
+            Self::Video => "mp4",
+            Self::Model3d => "glb",
+        }
     }
 }
 
@@ -198,6 +246,7 @@ pub fn workflow_media_summary(workflow: &WorkflowFile) -> WorkflowMediaSummary {
 
 pub fn media_previews_for_node(node: &WorkflowNode) -> Vec<MediaPreview> {
     let content_hint = content_type_hint(&node.data);
+    let node_label = explicit_node_label(&node.data).unwrap_or_default();
     let mut previews = Vec::new();
 
     for spec in SINGLE_MEDIA_FIELDS {
@@ -211,7 +260,10 @@ pub fn media_previews_for_node(node: &WorkflowNode) -> Vec<MediaPreview> {
         push_preview(
             &mut previews,
             spec,
-            source_field.to_string(),
+            PreviewSource {
+                label: label_for_single_preview(spec, &node_label),
+                source_field: source_field.to_string(),
+            },
             uri,
             content_hint,
         );
@@ -237,8 +289,10 @@ pub fn media_previews_for_node(node: &WorkflowNode) -> Vec<MediaPreview> {
             push_preview_with_label(
                 &mut previews,
                 spec,
-                label,
-                format!("{source_field}[{index}]"),
+                PreviewSource {
+                    label,
+                    source_field: format!("{source_field}[{index}]"),
+                },
                 uri,
                 content_hint,
             );
@@ -514,25 +568,17 @@ const ARRAY_MEDIA_FIELDS: &[MediaFieldSpec] = &[
 fn push_preview(
     previews: &mut Vec<MediaPreview>,
     spec: &MediaFieldSpec,
-    source_field: String,
+    source: PreviewSource,
     uri: String,
     content_hint: Option<MediaKind>,
 ) {
-    push_preview_with_label(
-        previews,
-        spec,
-        spec.label.to_string(),
-        source_field,
-        uri,
-        content_hint,
-    );
+    push_preview_with_label(previews, spec, source, uri, content_hint);
 }
 
 fn push_preview_with_label(
     previews: &mut Vec<MediaPreview>,
     spec: &MediaFieldSpec,
-    label: String,
-    source_field: String,
+    source: PreviewSource,
     uri: String,
     content_hint: Option<MediaKind>,
 ) {
@@ -542,10 +588,24 @@ fn push_preview_with_label(
     }
     previews.push(MediaPreview {
         kind: detect_media_kind(spec.kind, &uri, content_hint),
-        label,
+        label: source.label,
         uri,
-        source_field,
+        source_field: source.source_field,
     });
+}
+
+struct PreviewSource {
+    label: String,
+    source_field: String,
+}
+
+fn label_for_single_preview(spec: &MediaFieldSpec, node_label: &str) -> String {
+    let node_label = node_label.trim();
+    if !node_label.is_empty() && node_label != spec.label {
+        node_label.to_string()
+    } else {
+        spec.label.to_string()
+    }
 }
 
 fn content_type_hint(data: &Value) -> Option<MediaKind> {
@@ -559,6 +619,10 @@ fn content_type_hint(data: &Value) -> Option<MediaKind> {
         "3d" | "model3d" | "model-3d" => Some(MediaKind::Model3d),
         _ => None,
     }
+}
+
+fn explicit_node_label(data: &Value) -> Option<String> {
+    string_field(data, "label")
 }
 
 fn detect_media_kind(default: MediaKind, uri: &str, content_hint: Option<MediaKind>) -> MediaKind {
@@ -632,6 +696,116 @@ fn string_array_slots(data: &Value, field: &str) -> Vec<Option<String>> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+struct DataUrlParts<'a> {
+    mime: &'a str,
+    payload: &'a str,
+    is_base64: bool,
+}
+
+fn data_url_parts(value: &str) -> Option<DataUrlParts<'_>> {
+    let value = value.trim().strip_prefix("data:")?;
+    let (metadata, payload) = value.split_once(',')?;
+    let mut parts = metadata.split(';');
+    let mime = parts
+        .next()
+        .filter(|mime| !mime.trim().is_empty())
+        .unwrap_or("text/plain")
+        .trim();
+    let is_base64 = parts.any(|part| part.eq_ignore_ascii_case("base64"));
+    Some(DataUrlParts {
+        mime,
+        payload,
+        is_base64,
+    })
+}
+
+fn base64_decoded_len(value: &str) -> usize {
+    let encoded_len = value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .count();
+    let padding = value
+        .trim_end()
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count()
+        .min(2);
+    (encoded_len.saturating_mul(3) / 4usize).saturating_sub(padding)
+}
+
+fn human_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn sanitize_filename(value: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut previous_separator = false;
+    for ch in value.trim().chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, '-' | '_') {
+            Some(ch)
+        } else {
+            Some('-')
+        };
+
+        if let Some(ch) = next {
+            if ch == '-' || ch == '_' {
+                if previous_separator {
+                    continue;
+                }
+                previous_separator = true;
+            } else {
+                previous_separator = false;
+            }
+            output.push(ch);
+        }
+    }
+
+    let output = output.trim_matches(['-', '_']).to_string();
+    (!output.is_empty()).then_some(output)
+}
+
+fn extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/svg+xml" => Some("svg"),
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/ogg" => Some("ogg"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "model/gltf-binary" => Some("glb"),
+        "model/gltf+json" | "application/gltf+json" => Some("gltf"),
+        _ => None,
+    }
+}
+
+fn extension_from_uri(uri: &str) -> Option<&str> {
+    let path = uri
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(uri)
+        .trim_end_matches('/');
+    let extension = path.rsplit_once('.')?.1;
+    (!extension.is_empty()
+        && extension.len() <= 8
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then_some(extension)
 }
 
 fn truncate_middle(value: &str, max_chars: usize) -> String {
@@ -729,6 +903,11 @@ mod tests {
         assert_eq!(previews[0].kind, MediaKind::Image);
         assert_eq!(previews[0].source_field, "image");
         assert_eq!(previews[0].uri, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(previews[0].inline_mime().as_deref(), Some("image/png"));
+        assert_eq!(previews[0].inline_byte_len(), Some(5));
+        assert_eq!(previews[0].size_hint().as_deref(), Some("5 B"));
+        assert_eq!(previews[0].download_filename(), "image.png");
+        assert!(previews[0].should_inline_preview());
     }
 
     #[test]
@@ -788,6 +967,51 @@ mod tests {
         assert_eq!(previews.len(), 1);
         assert_eq!(previews[0].kind, MediaKind::Model3d);
         assert_eq!(previews[0].label, "3D model");
+        assert_eq!(previews[0].download_filename(), "3d-model.glb");
+    }
+
+    #[test]
+    fn media_preview_marks_large_inline_payloads_as_non_inline_previews() {
+        let payload = "A".repeat(DEFAULT_INLINE_PREVIEW_LIMIT_BYTES * 4 / 3 + 8);
+        let node = WorkflowNode::new(
+            "large",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "label": "Large Inline Image",
+                "image": format!("data:image/png;base64,{payload}")
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert!(previews[0].is_renderable_uri());
+        assert!(previews[0].is_large_inline());
+        assert!(!previews[0].should_inline_preview());
+        assert_eq!(previews[0].download_filename(), "large-inline-image.png");
+    }
+
+    #[test]
+    fn media_preview_download_filename_uses_url_extension_when_available() {
+        let node = WorkflowNode::new(
+            "video",
+            NodeType::VideoInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "label": "Rendered Clip",
+                "video": "https://example.invalid/media/rendered.webm?token=1"
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].download_filename(), "rendered-clip.webm");
+        assert_eq!(
+            previews[0].uri_hint(),
+            "https://example.invalid/media/rendered.webm?token=1"
+        );
     }
 
     #[test]

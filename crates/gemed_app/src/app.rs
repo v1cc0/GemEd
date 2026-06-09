@@ -124,6 +124,9 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-preview audio { display: block; width: 100%; height: 2.2rem; padding: 0 .35rem .35rem; }
 .media-preview-placeholder { min-height: 3.2rem; display: grid; place-items: center; padding: .7rem; color: #9fb0cf; text-align: center; font-size: .72rem; overflow-wrap: anywhere; background: repeating-linear-gradient(135deg, rgba(148, 163, 184, .06) 0, rgba(148, 163, 184, .06) 8px, transparent 8px, transparent 16px); }
 .media-preview-hint { margin: 0; padding: .34rem .48rem .46rem; color: #8ea1c2; font-size: .68rem; overflow-wrap: anywhere; }
+.media-preview-actions { display: flex; gap: .35rem; padding: .42rem .48rem 0; }
+.media-preview-link { border: 1px solid rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); border-radius: .48rem; padding: .18rem .38rem; font-size: .68rem; text-decoration: none; }
+.media-preview-link:hover { background: rgba(14, 165, 233, .22); }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
 .handle-column { position: absolute; top: 3.25rem; bottom: .75rem; display: flex; flex-direction: column; justify-content: center; gap: .28rem; z-index: 4; pointer-events: auto; }
 .handle-column.target { left: -.55rem; align-items: flex-start; }
@@ -1743,6 +1746,8 @@ fn MediaPreviewCard(preview: MediaPreview) -> Element {
     let uri_hint = preview.uri_hint();
     let source_field = preview.source_field.clone();
     let renderable = preview.is_renderable_uri();
+    let inline_preview = preview.should_inline_preview();
+    let download_filename = preview.download_filename();
 
     rsx! {
         div { class: "media-preview",
@@ -1750,23 +1755,27 @@ fn MediaPreviewCard(preview: MediaPreview) -> Element {
                 span { "{label}" }
                 span { class: "{kind_class}", "{kind_label}" }
             }
-            if renderable && preview.kind == MediaKind::Image {
+            if inline_preview && preview.kind == MediaKind::Image {
                 img {
                     src: "{uri}",
                     alt: "{label}",
                     loading: "lazy",
                 }
-            } else if renderable && preview.kind == MediaKind::Video {
+            } else if inline_preview && preview.kind == MediaKind::Video {
                 video {
                     src: "{uri}",
                     controls: true,
                     preload: "metadata",
                 }
-            } else if renderable && preview.kind == MediaKind::Audio {
+            } else if inline_preview && preview.kind == MediaKind::Audio {
                 audio {
                     src: "{uri}",
                     controls: true,
                     preload: "metadata",
+                }
+            } else if renderable && preview.is_large_inline() {
+                div { class: "media-preview-placeholder",
+                    "Large inline media detected. Use Open or Download instead of rendering it inside the node card."
                 }
             } else if preview.kind == MediaKind::Model3d {
                 div { class: "media-preview-placeholder",
@@ -1775,6 +1784,23 @@ fn MediaPreviewCard(preview: MediaPreview) -> Element {
             } else {
                 div { class: "media-preview-placeholder",
                     "Media reference detected, but this URI must be hydrated or handled by a platform adapter before inline preview."
+                }
+            }
+            if renderable {
+                div { class: "media-preview-actions",
+                    a {
+                        class: "media-preview-link",
+                        href: "{uri}",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Open"
+                    }
+                    a {
+                        class: "media-preview-link",
+                        href: "{uri}",
+                        download: "{download_filename}",
+                        "Download"
+                    }
                 }
             }
             p { class: "media-preview-hint",
