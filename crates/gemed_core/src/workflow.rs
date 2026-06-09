@@ -160,10 +160,10 @@ impl WorkflowFile {
                     NodeType::GlbViewer,
                     Position { x: 780.0, y: 410.0 },
                     serde_json::json!({
-                        "label": "Project GLB Reference",
+                        "label": "Inline GLB Preview",
                         "status": "idle",
-                        "glbUrl": "gemed-media://media/demo-model.glb",
-                        "filename": "demo-model.glb"
+                        "glbUrl": SAMPLE_GLB_DATA_URL,
+                        "filename": "gemed-triangle.glb"
                     }),
                 ),
             ],
@@ -843,6 +843,24 @@ const SAMPLE_MP4_VIDEO_DATA_URL: &str = concat!(
     "Y19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49",
     "MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAD2WIhAAr//72",
     "c3wKa22xgQ==",
+);
+
+const SAMPLE_GLB_DATA_URL: &str = concat!(
+    "data:model/gltf-binary;base64,",
+    "Z2xURgIAAAC0AgAAdAIAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAiLCJnZW5l",
+    "cmF0b3IiOiJHZW1FZCBzYW1wbGUifSwic2NlbmUiOjAsInNjZW5lcyI6W3sibm9kZXMi",
+    "OlswXX1dLCJub2RlcyI6W3sibWVzaCI6MCwibmFtZSI6IkdlbUVkIFRyaWFuZ2xlIn1d",
+    "LCJtZXNoZXMiOlt7Im5hbWUiOiJQcmV2aWV3IFRyaWFuZ2xlIiwicHJpbWl0aXZlcyI6",
+    "W3siYXR0cmlidXRlcyI6eyJQT1NJVElPTiI6MH0sIm1hdGVyaWFsIjowLCJtb2RlIjo0",
+    "fV19XSwibWF0ZXJpYWxzIjpbeyJuYW1lIjoiR2VtRWQgQmx1ZSIsImRvdWJsZVNpZGVk",
+    "Ijp0cnVlLCJwYnJNZXRhbGxpY1JvdWdobmVzcyI6eyJiYXNlQ29sb3JGYWN0b3IiOlsw",
+    "LjIxLDAuNTUsMS4wLDEuMF0sIm1ldGFsbGljRmFjdG9yIjowLjAsInJvdWdobmVzc0Zh",
+    "Y3RvciI6MC41NX19XSwiYWNjZXNzb3JzIjpbeyJidWZmZXJWaWV3IjowLCJjb21wb25l",
+    "bnRUeXBlIjo1MTI2LCJjb3VudCI6MywidHlwZSI6IlZFQzMiLCJtaW4iOlstMC42LC0w",
+    "LjQ1LDAuMF0sIm1heCI6WzAuNiwwLjYsMC4wXX1dLCJidWZmZXJWaWV3cyI6W3siYnVm",
+    "ZmVyIjowLCJieXRlT2Zmc2V0IjowLCJieXRlTGVuZ3RoIjozNiwidGFyZ2V0IjozNDk2",
+    "Mn1dLCJidWZmZXJzIjpbeyJieXRlTGVuZ3RoIjozNn1dfSAgJAAAAEJJTgCamRm/Zmbm",
+    "vgAAAACamRk/ZmbmvgAAAAAAAAAAmpkZPwAAAAA=",
 );
 
 impl Default for EdgeStyle {

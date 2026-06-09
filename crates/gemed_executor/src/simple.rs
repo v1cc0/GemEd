@@ -716,9 +716,9 @@ fn execute_glb_viewer(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutc
             updates.insert("__mediaAdapter".to_string(), json!("rust-glb-viewer-plan"));
 
             let message = if can_open_uri_directly {
-                "GLB viewer adapter boundary planned; WebGL render/capture remains platform adapter work."
+                "GLB viewer WebView preview planned; PNG capture remains platform adapter work."
             } else {
-                "GLB viewer adapter boundary planned; project media must be hydrated before WebGL render/capture."
+                "GLB viewer adapter boundary planned; project media must be hydrated before WebView preview/capture."
             };
             NodeOutcome::complete(message, updates)
         }
@@ -1691,7 +1691,7 @@ mod tests {
         );
         assert_eq!(
             plan.get("requiresWebglAdapter").and_then(Value::as_bool),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             output.data.get("model3d").and_then(Value::as_str),

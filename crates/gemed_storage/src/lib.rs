@@ -1536,7 +1536,7 @@ mod tests {
 
         let snapshot = project.save(&workflow).expect("save media sample project");
 
-        assert_eq!(snapshot.manifest.media_files.len(), 3);
+        assert_eq!(snapshot.manifest.media_files.len(), 4);
         for media_file in &snapshot.manifest.media_files {
             assert!(root.join(media_file).is_file());
         }
@@ -1544,8 +1544,9 @@ mod tests {
         assert!(!saved_json.contains("data:image/svg+xml"));
         assert!(!saved_json.contains("data:audio/wav"));
         assert!(!saved_json.contains("data:video/mp4"));
+        assert!(!saved_json.contains("data:model/gltf-binary"));
         assert!(saved_json.contains("gemed-media://media/external-preview.png"));
-        assert!(saved_json.contains("gemed-media://media/demo-model.glb"));
+        assert!(saved_json.contains(".glb"));
 
         let loaded = project.load().expect("load media sample project");
         assert_eq!(loaded.workflow.name, workflow.name);
@@ -1571,7 +1572,7 @@ mod tests {
         );
         assert_eq!(
             loaded.workflow.nodes[4].data["glbUrl"],
-            "gemed-media://media/demo-model.glb"
+            workflow.nodes[4].data["glbUrl"]
         );
 
         let _ = std::fs::remove_dir_all(root);

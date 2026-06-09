@@ -35,6 +35,8 @@ const CANVAS_HEIGHT: f64 = 900.0;
 const NODE_CARD_WIDTH: f64 = 248.0;
 const NODE_CARD_HEIGHT: f64 = 128.0;
 const GROUP_SELECTION_MIN_SIZE: f64 = 18.0;
+const MODEL_VIEWER_MODULE_URL: &str =
+    "https://unpkg.com/@google/model-viewer@4.3.1/dist/model-viewer.min.js";
 
 const APP_CSS: &str = r#"
 :root {
@@ -132,6 +134,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-preview-kind.model3d { color: #ddd6fe; border-color: rgba(196, 181, 253, .28); }
 .media-preview img, .media-preview video { display: block; width: 100%; max-height: 8rem; object-fit: cover; background: #020617; }
 .media-preview audio { display: block; width: 100%; height: 2.2rem; padding: 0 .35rem .35rem; }
+.media-preview-model { display: block; width: 100%; min-height: 9rem; height: 9rem; border: 0; background: #020617; }
 .media-preview-placeholder { min-height: 3.2rem; display: grid; place-items: center; padding: .7rem; color: #9fb0cf; text-align: center; font-size: .72rem; overflow-wrap: anywhere; background: repeating-linear-gradient(135deg, rgba(148, 163, 184, .06) 0, rgba(148, 163, 184, .06) 8px, transparent 8px, transparent 16px); }
 .media-preview-error { margin: .42rem .48rem 0; border-radius: .55rem; padding: .42rem .5rem; color: #fecaca; background: rgba(127, 29, 29, .32); border: 1px solid rgba(248, 113, 113, .22); font-size: .68rem; line-height: 1.3; }
 .media-copy-status { margin: .36rem .48rem 0; color: #bbf7d0; font-size: .66rem; line-height: 1.25; overflow-wrap: anywhere; }
@@ -148,6 +151,7 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-overlay-body { min-height: 0; display: grid; place-items: center; padding: 1rem; background: #020617; overflow: auto; }
 .media-overlay-image { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: .6rem; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
 .media-overlay-video { display: block; width: min(100%, 64rem); max-height: 70vh; border-radius: .6rem; background: #020617; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
+.media-overlay-model { display: block; width: min(100%, 64rem); height: min(70vh, 42rem); min-height: 24rem; border: 0; border-radius: .6rem; background: #020617; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
 .media-overlay-audio-shell { width: min(42rem, 100%); display: grid; gap: .8rem; justify-items: stretch; padding: 1.1rem; border-radius: .9rem; border: 1px solid rgba(148, 163, 184, .18); background: rgba(15, 23, 42, .72); }
 .media-overlay-audio-shell p { margin: 0; color: #bfdbfe; font-size: .84rem; text-align: center; }
 .media-overlay-audio { width: 100%; }
@@ -2241,13 +2245,12 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
             lines.extend(glb_metadata_lines(metadata));
         }
         lines.push(if can_open {
-            "preview: URI can be opened by the WebView once a GLB/WebGL adapter is wired"
-                .to_string()
+            "preview: WebView model-viewer adapter can open this URI".to_string()
         } else {
-            "preview: project media must be hydrated before WebGL viewer handoff".to_string()
+            "preview: project media must be hydrated before model-viewer handoff".to_string()
         });
         if requires_webgl {
-            lines.push("adapter: GLB/WebGL render adapter pending".to_string());
+            lines.push("adapter: model URI hydration/WebGL handoff pending".to_string());
         }
         if requires_capture {
             lines.push(
@@ -2283,7 +2286,8 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
         title: "GLB viewer plan".to_string(),
         lines: vec![
             "Run Local to inspect GLB URI metadata.".to_string(),
-            "WebGL render and PNG capture still need a platform adapter.".to_string(),
+            "Renderable GLB URIs can preview in WebView; PNG capture still needs a platform adapter."
+                .to_string(),
         ],
     }
 }
@@ -2463,9 +2467,24 @@ fn MediaPreviewCard(
                 div { class: "media-preview-placeholder",
                     "Large inline media detected. Use Open or Download instead of rendering it inside the node card."
                 }
+            } else if inline_preview && preview.kind == MediaKind::Model3d {
+                {
+                    let srcdoc = glb_model_viewer_srcdoc(&uri, &label);
+                    rsx! {
+                        iframe {
+                            class: "media-preview-model",
+                            title: "{label} GLB preview",
+                            srcdoc: "{srcdoc}",
+                            allow: "fullscreen; xr-spatial-tracking",
+                            onload: move |_| {
+                                load_error.set(false);
+                            },
+                        }
+                    }
+                }
             } else if preview.kind == MediaKind::Model3d {
                 div { class: "media-preview-placeholder",
-                    "3D model reference detected. Use Open/Download for now; inline GLB/WebGL preview adapter is still pending."
+                    "3D model reference detected. Project refs must be hydrated before the WebView model-viewer preview can load."
                 }
             } else {
                 div { class: "media-preview-placeholder",
@@ -2662,12 +2681,27 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                     },
                                 }
                             }
+                        } else if overlay.kind == MediaKind::Model3d {
+                            {
+                                let srcdoc = glb_model_viewer_srcdoc(&overlay.uri, &overlay.label);
+                                rsx! {
+                                    iframe {
+                                        class: "media-overlay-model",
+                                        title: "{overlay.label} GLB preview",
+                                        srcdoc: "{srcdoc}",
+                                        allow: "fullscreen; xr-spatial-tracking",
+                                        onload: move |_| {
+                                            load_error.set(false);
+                                        },
+                                    }
+                                }
+                            }
                         } else {
                             div { class: "media-overlay-placeholder",
                                 "No inline overlay adapter is available for this media kind yet."
                             }
                         }
-                        if matches!(overlay.kind, MediaKind::Image | MediaKind::Audio | MediaKind::Video) && load_error() {
+                        if matches!(overlay.kind, MediaKind::Image | MediaKind::Audio | MediaKind::Video | MediaKind::Model3d) && load_error() {
                             div { class: "media-overlay-error",
                                 "{overlay_error_message}"
                             }
@@ -2691,7 +2725,7 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
 fn media_overlay_from_preview(preview: &MediaPreview) -> Option<MediaOverlay> {
     if !matches!(
         preview.kind,
-        MediaKind::Image | MediaKind::Audio | MediaKind::Video
+        MediaKind::Image | MediaKind::Audio | MediaKind::Video | MediaKind::Model3d
     ) || !preview.should_inline_preview()
     {
         return None;
@@ -2728,9 +2762,85 @@ fn media_error_message(kind: MediaKind) -> &'static str {
             "Video preview failed to load. The URI may be missing, blocked, or unsupported."
         }
         MediaKind::Model3d => {
-            "3D preview requires a GLB/WebGL adapter before it can be loaded inline."
+            "3D preview failed to load. The GLB URI may need project hydration or WebView/WebGL support."
         }
     }
+}
+
+fn glb_model_viewer_srcdoc(uri: &str, label: &str) -> String {
+    let uri = html_attr_escape(uri);
+    let label = html_attr_escape(label);
+    let module_url = html_attr_escape(MODEL_VIEWER_MODULE_URL);
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {{
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: #020617;
+      color: #dbeafe;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }}
+    model-viewer {{
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
+      --poster-color: #020617;
+      background: radial-gradient(circle at 30% 20%, rgba(96, 165, 250, .20), transparent 34%), #020617;
+    }}
+    .poster, .fallback {{
+      position: absolute;
+      inset: auto .7rem .65rem .7rem;
+      padding: .42rem .5rem;
+      border-radius: .55rem;
+      border: 1px solid rgba(148, 163, 184, .22);
+      background: rgba(15, 23, 42, .78);
+      color: #bfdbfe;
+      font-size: 12px;
+      line-height: 1.35;
+      text-align: center;
+    }}
+  </style>
+  <script type="module" src="{module_url}"></script>
+</head>
+<body>
+  <model-viewer
+    src="{uri}"
+    alt="{label}"
+    camera-controls
+    auto-rotate
+    interaction-prompt="auto"
+    shadow-intensity="0.7"
+    exposure="1"
+    loading="eager"
+    reveal="auto">
+    <div slot="poster" class="poster">Loading GLB preview...</div>
+    <div class="fallback">If the WebGL viewer does not load, use Open or Download.</div>
+  </model-viewer>
+</body>
+</html>"#
+    )
+}
+
+fn html_attr_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn copy_media_uri_script(uri: &str) -> String {
@@ -5030,7 +5140,21 @@ mod tests {
         assert!(media_error_message(MediaKind::Image).starts_with("Image preview failed"));
         assert!(media_error_message(MediaKind::Audio).starts_with("Audio preview failed"));
         assert!(media_error_message(MediaKind::Video).starts_with("Video preview failed"));
-        assert!(media_error_message(MediaKind::Model3d).contains("GLB/WebGL adapter"));
+        assert!(media_error_message(MediaKind::Model3d).contains("3D preview failed"));
+    }
+
+    #[test]
+    fn glb_model_viewer_srcdoc_escapes_inputs_and_loads_model_viewer_module() {
+        let html = super::glb_model_viewer_srcdoc(
+            "data:model/gltf-binary;base64,AA\"<&",
+            "Inline \"GLB\" <test>",
+        );
+
+        assert!(html.contains("@google/model-viewer@4.3.1"));
+        assert!(html.contains("<model-viewer"));
+        assert!(html.contains("camera-controls"));
+        assert!(html.contains("data:model/gltf-binary;base64,AA&quot;&lt;&amp;"));
+        assert!(html.contains("Inline &quot;GLB&quot; &lt;test&gt;"));
     }
 
     #[test]
@@ -5261,11 +5385,11 @@ mod tests {
     }
 
     #[test]
-    fn media_overlay_excludes_adapter_refs_and_large_inline_payloads() {
+    fn media_overlay_supports_renderable_glb_and_excludes_refs_or_large_payloads() {
         let model_preview = MediaPreview {
             kind: MediaKind::Model3d,
-            label: "Project GLB".to_string(),
-            uri: "https://example.test/demo.glb".to_string(),
+            label: "Inline GLB".to_string(),
+            uri: test_inline_glb_data_url().to_string(),
             source_field: "glbUrl".to_string(),
         };
         let project_ref_preview = MediaPreview {
@@ -5281,7 +5405,9 @@ mod tests {
             source_field: "image".to_string(),
         };
 
-        assert!(media_overlay_from_preview(&model_preview).is_none());
+        let model_overlay = media_overlay_from_preview(&model_preview).expect("GLB has overlay");
+        assert_eq!(model_overlay.kind, MediaKind::Model3d);
+        assert_eq!(model_overlay.download_filename, "inline-glb.glb");
         assert!(media_overlay_from_preview(&project_ref_preview).is_none());
         assert!(media_overlay_from_preview(&large_inline_preview).is_none());
     }
@@ -5435,7 +5561,7 @@ mod tests {
             insight
                 .lines
                 .iter()
-                .any(|line| line.contains("GLB/WebGL render adapter pending"))
+                .any(|line| line.contains("model-viewer adapter can open this URI"))
         );
         assert!(
             insight

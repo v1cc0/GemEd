@@ -286,8 +286,8 @@ pub fn plan_glb_viewer(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
         metadata,
-        viewer_adapter: "webgl-glb-viewer".to_string(),
-        requires_webgl_adapter: true,
+        viewer_adapter: "webview-model-viewer".to_string(),
+        requires_webgl_adapter: !can_open_uri_directly,
         can_open_uri_directly,
         capture_output_mime: "image/png".to_string(),
         requires_capture_adapter: true,
@@ -1108,9 +1108,9 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
         NodeType::GlbViewer => profile(
             node_type,
             vec![MediaKind::Model3d],
-            MediaSupportLevel::AdapterRequired,
-            MediaSupportLevel::AdapterRequired,
-            "GLB viewer needs WebGL/WebView-compatible preview adapter.",
+            MediaSupportLevel::PreviewOnly,
+            MediaSupportLevel::PreviewOnly,
+            "Renderable GLB URIs can preview through the WebView model-viewer adapter; PNG capture still needs an adapter and project refs need hydration.",
         ),
         NodeType::Output | NodeType::OutputGallery => profile(
             node_type,
@@ -1600,6 +1600,18 @@ mod tests {
     }
 
     #[test]
+    fn glb_viewer_profile_is_preview_only_not_capture_ready() {
+        let profile = media_profile_for_node_type(&NodeType::GlbViewer).unwrap();
+
+        assert_eq!(profile.media_kinds, vec![MediaKind::Model3d]);
+        assert_eq!(profile.web, MediaSupportLevel::PreviewOnly);
+        assert_eq!(profile.desktop, MediaSupportLevel::PreviewOnly);
+        assert!(!profile.needs_adapter());
+        assert!(profile.notes.contains("model-viewer adapter"));
+        assert!(profile.notes.contains("PNG capture still needs an adapter"));
+    }
+
+    #[test]
     fn prompt_is_not_media_profile() {
         assert_eq!(media_profile_for_node_type(&NodeType::Prompt), None);
     }
@@ -1709,7 +1721,7 @@ mod tests {
         assert!(!plan.source.renderable_in_webview);
         assert_eq!(plan.filename.as_deref(), Some("demo-model.glb"));
         assert_eq!(plan.metadata, None);
-        assert_eq!(plan.viewer_adapter, "webgl-glb-viewer");
+        assert_eq!(plan.viewer_adapter, "webview-model-viewer");
         assert!(plan.requires_webgl_adapter);
         assert!(!plan.can_open_uri_directly);
         assert_eq!(plan.capture_output_mime, "image/png");
@@ -1727,7 +1739,8 @@ mod tests {
         assert_eq!(plan.source.byte_length, Some(bytes.len()));
         assert!(plan.source.renderable_in_webview);
         assert!(plan.can_open_uri_directly);
-        assert!(plan.requires_webgl_adapter);
+        assert_eq!(plan.viewer_adapter, "webview-model-viewer");
+        assert!(!plan.requires_webgl_adapter);
         let metadata = plan.metadata.expect("inline GLB metadata is parsed");
         assert_eq!(metadata.version, 2);
         assert_eq!(metadata.declared_byte_length, bytes.len());
@@ -1953,14 +1966,14 @@ mod tests {
                 .iter()
                 .filter(|preview| preview.is_renderable_uri())
                 .count(),
-            5
+            6
         );
         assert_eq!(
             previews
                 .iter()
                 .filter(|preview| preview.uri.starts_with("gemed-media://"))
                 .count(),
-            2
+            1
         );
         assert!(
             previews
