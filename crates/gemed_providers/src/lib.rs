@@ -832,12 +832,24 @@ impl Model3dProvider for MockProvider {
 }
 
 #[cfg(feature = "http")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenAiResponsesProvider {
     api_key: String,
     endpoint: String,
     default_model: String,
     transport: Arc<dyn OpenAiResponsesTransport>,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for OpenAiResponsesProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiResponsesProvider")
+            .field("api_key", &"<redacted>")
+            .field("endpoint", &self.endpoint)
+            .field("default_model", &self.default_model)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "http")]
@@ -1127,6 +1139,329 @@ fn extract_openai_response_text(value: &mut Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+#[cfg(feature = "http")]
+#[derive(Clone)]
+pub struct AnthropicMessagesProvider {
+    api_key: String,
+    endpoint: String,
+    api_version: String,
+    default_model: String,
+    transport: Arc<dyn AnthropicMessagesTransport>,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for AnthropicMessagesProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicMessagesProvider")
+            .field("api_key", &"<redacted>")
+            .field("endpoint", &self.endpoint)
+            .field("api_version", &self.api_version)
+            .field("default_model", &self.default_model)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "http")]
+impl AnthropicMessagesProvider {
+    pub const DEFAULT_ENDPOINT: &'static str = "https://api.anthropic.com/v1/messages";
+    pub const DEFAULT_API_VERSION: &'static str = "2023-06-01";
+    pub const DEFAULT_MODEL: &'static str = "claude-sonnet-4-6";
+    pub const DEFAULT_MAX_TOKENS: u32 = 1024;
+
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            endpoint: Self::DEFAULT_ENDPOINT.to_string(),
+            api_version: Self::DEFAULT_API_VERSION.to_string(),
+            default_model: Self::DEFAULT_MODEL.to_string(),
+            transport: Arc::new(UreqAnthropicMessagesTransport),
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = normalize_anthropic_messages_endpoint(&endpoint.into());
+        self
+    }
+
+    pub fn with_api_version(mut self, api_version: impl Into<String>) -> Self {
+        let api_version = api_version.into();
+        if !api_version.trim().is_empty() {
+            self.api_version = api_version.trim().to_string();
+        }
+        self
+    }
+
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        if !model.trim().is_empty() {
+            self.default_model = model.trim().to_string();
+        }
+        self
+    }
+
+    pub fn with_transport(mut self, transport: impl AnthropicMessagesTransport + 'static) -> Self {
+        self.transport = Arc::new(transport);
+        self
+    }
+
+    pub fn from_config_with_secret<F>(
+        config: &ProviderConfig,
+        resolver: &F,
+    ) -> Result<Option<Self>, ProviderError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if !config.enabled
+            || config.id != ProviderId::Anthropic
+            || config.runtime_mode != ProviderRuntimeMode::DirectDesktop
+        {
+            return Ok(None);
+        }
+
+        let api_key = match &config.secret_source {
+            ProviderSecretSource::Environment { variable } => resolver(variable)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::MissingSecret(format!(
+                        "environment variable `{variable}` is not set"
+                    ))
+                })?,
+            ProviderSecretSource::DesktopKeychain { service, account } => {
+                return Err(ProviderError::MissingSecret(format!(
+                    "desktop keychain `{service}/{account}` resolution is not implemented yet"
+                )));
+            }
+            ProviderSecretSource::None | ProviderSecretSource::WebBackend { .. } => {
+                return Err(ProviderError::MissingSecret(
+                    "Anthropic direct desktop provider requires an environment secret source"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let mut provider = Self::new(api_key);
+        if let Some(base_url) = config.base_url.as_deref() {
+            provider = provider.with_endpoint(base_url);
+        }
+        if let Some(model) = config.default_model.as_deref() {
+            provider = provider.with_default_model(model);
+        }
+        Ok(Some(provider))
+    }
+}
+
+#[cfg(feature = "http")]
+impl ProviderBackend for AnthropicMessagesProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Anthropic
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ModelCatalog for AnthropicMessagesProvider {
+    async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+        Ok(vec![ProviderModel {
+            provider: ProviderId::Anthropic,
+            model_id: self.default_model.clone(),
+            display_name: self.default_model.clone(),
+            capabilities: vec![ProviderCapability::Llm],
+            pricing: None,
+        }])
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl LlmProvider for AnthropicMessagesProvider {
+    async fn generate_text(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        validate_prompt(&request.prompt)?;
+        let body = anthropic_messages_request_body(&request, &self.default_model);
+        let mut response =
+            self.transport
+                .send_json(&self.endpoint, &self.api_key, &self.api_version, &body)?;
+        let text = extract_anthropic_message_text(&mut response).ok_or_else(|| {
+            ProviderError::RequestFailed(
+                "Anthropic response did not contain text content".to_string(),
+            )
+        })?;
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(request.model.as_str())
+            .to_string();
+        Ok(LlmResponse {
+            text,
+            provider: ProviderId::Anthropic,
+            model,
+        })
+    }
+}
+
+#[cfg(feature = "http")]
+pub trait AnthropicMessagesTransport: std::fmt::Debug {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        api_version: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError>;
+}
+
+#[cfg(feature = "http")]
+#[derive(Clone, Debug)]
+struct UreqAnthropicMessagesTransport;
+
+#[cfg(feature = "http")]
+impl AnthropicMessagesTransport for UreqAnthropicMessagesTransport {
+    fn send_json(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        api_version: &str,
+        body: &Value,
+    ) -> Result<Value, ProviderError> {
+        ureq::post(endpoint)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", api_version)
+            .header("Accept", "application/json")
+            .send_json(body)
+            .map_err(anthropic_transport_error)?
+            .body_mut()
+            .read_json()
+            .map_err(anthropic_transport_error)
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ImageProvider for AnthropicMessagesProvider {
+    async fn generate_image(&self, _request: ImageRequest) -> Result<ImageResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "image",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl VideoProvider for AnthropicMessagesProvider {
+    async fn generate_video(&self, _request: VideoRequest) -> Result<VideoResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "video",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl AudioProvider for AnthropicMessagesProvider {
+    async fn generate_audio(&self, _request: AudioRequest) -> Result<AudioResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "audio",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl Model3dProvider for AnthropicMessagesProvider {
+    async fn generate_model3d(
+        &self,
+        _request: Model3dRequest,
+    ) -> Result<Model3dResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "3D",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+fn normalize_anthropic_messages_endpoint(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return AnthropicMessagesProvider::DEFAULT_ENDPOINT.to_string();
+    }
+    if trimmed.ends_with("/messages") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/messages")
+    }
+}
+
+#[cfg(feature = "http")]
+fn anthropic_messages_request_body(request: &LlmRequest, default_model: &str) -> Value {
+    let model = if request.model.trim().is_empty() || request.model == "mock-llm" {
+        default_model
+    } else {
+        request.model.as_str()
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("model".to_string(), json_value(model));
+    body.insert(
+        "max_tokens".to_string(),
+        serde_json::json!(
+            request
+                .max_tokens
+                .unwrap_or(AnthropicMessagesProvider::DEFAULT_MAX_TOKENS)
+        ),
+    );
+    body.insert(
+        "messages".to_string(),
+        serde_json::json!([{ "role": "user", "content": request.prompt }]),
+    );
+    if let Some(temperature) = request.temperature {
+        body.insert("temperature".to_string(), serde_json::json!(temperature));
+    }
+    if let Value::Object(parameters) = &request.parameters {
+        for (key, value) in parameters {
+            body.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    Value::Object(body)
+}
+
+#[cfg(feature = "http")]
+fn anthropic_transport_error(error: ureq::Error) -> ProviderError {
+    match error {
+        ureq::Error::StatusCode(status) => {
+            ProviderError::RequestFailed(format!("Anthropic API returned HTTP {status}"))
+        }
+        other => ProviderError::RequestFailed(format!("Anthropic API request failed: {other}")),
+    }
+}
+
+#[cfg(feature = "http")]
+fn extract_anthropic_message_text(value: &mut Value) -> Option<String> {
+    let mut parts = Vec::new();
+    let content = value.get_mut("content")?.as_array_mut()?;
+    for content_item in content {
+        let Some(text) = content_item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let item_type = content_item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if item_type.is_empty() || item_type == "text" {
+            parts.push(text.to_string());
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn validate_prompt(prompt: &str) -> Result<(), ProviderError> {
     if prompt.trim().is_empty() {
         return Err(ProviderError::InvalidRequest(
@@ -1387,6 +1722,7 @@ mod tests {
         .expect("provider created");
 
         assert_eq!(provider.default_model, "gpt-test");
+        assert!(!format!("{provider:?}").contains("sk-test-secret"));
         assert_eq!(
             OpenAiResponsesProvider::from_config_with_secret(&config, &|_| None::<String>)
                 .expect_err("missing secret rejected")
@@ -1494,6 +1830,216 @@ mod tests {
 
         assert!(
             matches!(err, ProviderError::RequestFailed(message) if message == "fake network failure")
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_messages_body_maps_llm_request() {
+        let body = anthropic_messages_request_body(
+            &LlmRequest {
+                provider: ProviderId::Anthropic,
+                model: "claude-test".to_string(),
+                prompt: "hello".to_string(),
+                input_images: Vec::new(),
+                temperature: Some(0.2),
+                max_tokens: Some(64),
+                parameters: serde_json::json!({
+                    "metadata": {
+                        "user_id": "fixture-user"
+                    }
+                }),
+            },
+            AnthropicMessagesProvider::DEFAULT_MODEL,
+        );
+
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "hello");
+        assert_eq!(body["metadata"]["user_id"], "fixture-user");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_messages_body_uses_default_model_and_token_cap() {
+        let body = anthropic_messages_request_body(
+            &LlmRequest {
+                provider: ProviderId::Anthropic,
+                model: "mock-llm".to_string(),
+                prompt: "hello".to_string(),
+                input_images: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                parameters: Value::Null,
+            },
+            "claude-default",
+        );
+
+        assert_eq!(body["model"], "claude-default");
+        assert_eq!(
+            body["max_tokens"],
+            AnthropicMessagesProvider::DEFAULT_MAX_TOKENS
+        );
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_message_text_extracts_text_blocks() {
+        let mut response = serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "first"
+                },
+                {
+                    "type": "tool_use",
+                    "name": "ignored"
+                },
+                {
+                    "type": "text",
+                    "text": "second"
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_anthropic_message_text(&mut response),
+            Some("first\nsecond".to_string())
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_provider_from_config_resolves_env_secret_without_leaking_it() {
+        let config = ProviderConfig::direct_desktop_env(
+            ProviderId::Anthropic,
+            "ANTHROPIC_API_KEY",
+            Some("claude-test".to_string()),
+        );
+
+        let provider = AnthropicMessagesProvider::from_config_with_secret(&config, &|name| {
+            (name == "ANTHROPIC_API_KEY").then(|| "sk-ant-test-secret".to_string())
+        })
+        .expect("config resolves")
+        .expect("provider created");
+
+        assert_eq!(provider.default_model, "claude-test");
+        assert!(!format!("{provider:?}").contains("sk-ant-test-secret"));
+        assert_eq!(
+            AnthropicMessagesProvider::from_config_with_secret(&config, &|_| None::<String>)
+                .expect_err("missing secret rejected")
+                .to_string(),
+            "provider secret is missing: environment variable `ANTHROPIC_API_KEY` is not set"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_provider_uses_transport_and_maps_response() {
+        type CapturedAnthropicRequest = Option<(String, String, String, Value)>;
+
+        #[derive(Debug)]
+        struct FakeTransport {
+            response: Mutex<Value>,
+            captured: Arc<Mutex<CapturedAnthropicRequest>>,
+        }
+
+        impl AnthropicMessagesTransport for FakeTransport {
+            fn send_json(
+                &self,
+                endpoint: &str,
+                api_key: &str,
+                api_version: &str,
+                body: &Value,
+            ) -> Result<Value, ProviderError> {
+                *self.captured.lock().unwrap() = Some((
+                    endpoint.to_string(),
+                    api_key.to_string(),
+                    api_version.to_string(),
+                    body.clone(),
+                ));
+                Ok(self.response.lock().unwrap().clone())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let transport = FakeTransport {
+            response: Mutex::new(serde_json::json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "hello from anthropic fake transport"
+                    }
+                ]
+            })),
+            captured: Arc::clone(&captured),
+        };
+
+        let provider = AnthropicMessagesProvider::new("sk-ant-test")
+            .with_endpoint("https://proxy.example.test/v1")
+            .with_api_version("2023-06-01")
+            .with_transport(transport);
+        let response = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::Anthropic,
+            model: "claude-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: Some(12),
+            parameters: Value::Null,
+        }))
+        .expect("fake transport response maps");
+
+        assert_eq!(response.text, "hello from anthropic fake transport");
+        assert_eq!(response.model, "claude-test");
+        let (endpoint, api_key, api_version, body) =
+            captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(endpoint, "https://proxy.example.test/v1/messages");
+        assert_eq!(api_key, "sk-ant-test");
+        assert_eq!(api_version, "2023-06-01");
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["messages"][0]["content"], "say hello");
+        assert_eq!(body["max_tokens"], 12);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn anthropic_provider_reports_transport_errors() {
+        #[derive(Debug)]
+        struct FailingTransport;
+
+        impl AnthropicMessagesTransport for FailingTransport {
+            fn send_json(
+                &self,
+                _endpoint: &str,
+                _api_key: &str,
+                _api_version: &str,
+                _body: &Value,
+            ) -> Result<Value, ProviderError> {
+                Err(ProviderError::RequestFailed(
+                    "fake anthropic network failure".to_string(),
+                ))
+            }
+        }
+
+        let provider =
+            AnthropicMessagesProvider::new("sk-ant-test").with_transport(FailingTransport);
+        let err = futures::executor::block_on(provider.generate_text(LlmRequest {
+            provider: ProviderId::Anthropic,
+            model: "claude-test".to_string(),
+            prompt: "say hello".to_string(),
+            input_images: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            parameters: Value::Null,
+        }))
+        .expect_err("fake transport failure propagates");
+
+        assert!(
+            matches!(err, ProviderError::RequestFailed(message) if message == "fake anthropic network failure")
         );
     }
 }

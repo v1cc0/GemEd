@@ -16,7 +16,7 @@ use gemed_executor::{
 };
 use gemed_media::{MediaKind, MediaPreview, media_previews_for_node, workflow_media_summary};
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
-use gemed_providers::OpenAiResponsesProvider;
+use gemed_providers::{AnthropicMessagesProvider, OpenAiResponsesProvider};
 use gemed_providers::{
     ProviderCapability, ProviderConfig, ProviderConfigSet, ProviderId, ProviderRegistry,
     ProviderRuntimeMode, ProviderSecretSource,
@@ -3029,17 +3029,42 @@ fn register_platform_provider_backends(
     registry: &mut ProviderRegistry,
 ) -> Result<(), String> {
     for provider in &config.providers {
-        if provider.id != ProviderId::OpenAi
-            || provider.runtime_mode != ProviderRuntimeMode::DirectDesktop
-        {
+        if provider.runtime_mode != ProviderRuntimeMode::DirectDesktop {
             continue;
         }
-        match OpenAiResponsesProvider::from_config_with_secret(provider, &provider_secret_env_value)
-        {
-            Ok(Some(backend)) => registry.register(backend),
-            Ok(None) => {}
-            Err(err) => return Err(err.to_string()),
+        match provider.id {
+            ProviderId::OpenAi => register_provider_backend(
+                registry,
+                OpenAiResponsesProvider::from_config_with_secret(
+                    provider,
+                    &provider_secret_env_value,
+                ),
+            )?,
+            ProviderId::Anthropic => register_provider_backend(
+                registry,
+                AnthropicMessagesProvider::from_config_with_secret(
+                    provider,
+                    &provider_secret_env_value,
+                ),
+            )?,
+            _ => {}
         }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop", feature = "providers-http"))]
+fn register_provider_backend(
+    registry: &mut ProviderRegistry,
+    backend: Result<
+        Option<impl gemed_providers::ProviderBackend + 'static>,
+        gemed_providers::ProviderError,
+    >,
+) -> Result<(), String> {
+    match backend {
+        Ok(Some(backend)) => registry.register(backend),
+        Ok(None) => {}
+        Err(err) => return Err(err.to_string()),
     }
     Ok(())
 }
