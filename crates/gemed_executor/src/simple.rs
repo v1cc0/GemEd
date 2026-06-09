@@ -22,6 +22,13 @@ pub struct SimpleExecutionReport {
 }
 
 impl SimpleExecutionReport {
+    pub fn loading_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| event.status == NodeStatusWire::Loading)
+            .count()
+    }
+
     pub fn executed_count(&self) -> usize {
         self.events
             .iter()
@@ -149,20 +156,28 @@ async fn execute_workflow_inner(
             .iter()
             .position(|node| node.id == node_id)
             .ok_or_else(|| SimpleExecutionError::MissingNode(node_id.clone()))?;
+        let node_type = workflow.nodes[index].node_type.title().to_string();
+        push_report_event(
+            &mut report,
+            node_id.clone(),
+            node_type.clone(),
+            NodeStatusWire::Loading,
+            "Node execution started.",
+        );
         if is_node_in_locked_group(&workflow, &node_id) {
-            let node_type = workflow.nodes[index].node_type.title().to_string();
             set_status(&mut workflow.nodes[index], NodeStatusWire::Skipped);
             set_data_field(
                 &mut workflow.nodes[index],
                 "error",
                 json!("Node skipped because its group is locked."),
             );
-            report.events.push(NodeExecutionEvent {
+            push_report_event(
+                &mut report,
                 node_id,
                 node_type,
-                status: NodeStatusWire::Skipped,
-                message: "Node skipped because its group is locked.".to_string(),
-            });
+                NodeStatusWire::Skipped,
+                "Node skipped because its group is locked.",
+            );
             continue;
         }
         let inputs = connected_inputs(&workflow, &node_id);
@@ -175,15 +190,31 @@ async fn execute_workflow_inner(
         } else {
             set_data_field(&mut workflow.nodes[index], "error", Value::Null);
         }
-        report.events.push(NodeExecutionEvent {
+        push_report_event(
+            &mut report,
             node_id,
-            node_type: node_snapshot.node_type.title().to_string(),
-            status: outcome.status,
-            message: outcome.message,
-        });
+            node_type,
+            outcome.status,
+            outcome.message,
+        );
     }
 
     Ok(SimpleExecutionResult { workflow, report })
+}
+
+fn push_report_event(
+    report: &mut SimpleExecutionReport,
+    node_id: String,
+    node_type: String,
+    status: NodeStatusWire,
+    message: impl Into<String>,
+) {
+    report.events.push(NodeExecutionEvent {
+        node_id,
+        node_type,
+        status,
+        message: message.into(),
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -1020,6 +1051,46 @@ mod tests {
     }
 
     #[test]
+    fn execution_report_records_loading_and_terminal_events_per_node() {
+        let workflow = WorkflowFile {
+            name: "progress".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"text":"hello"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::new("e1", "prompt", "output")],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("executes");
+
+        assert_eq!(result.report.loading_count(), 2);
+        assert_eq!(result.report.executed_count(), 2);
+        assert_eq!(result.report.skipped_count(), 0);
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.summary(), "2 complete, 0 skipped, 0 errors");
+        assert_eq!(result.report.events.len(), 4);
+        assert_eq!(result.report.events[0].node_id, "prompt");
+        assert_eq!(result.report.events[0].status, NodeStatusWire::Loading);
+        assert_eq!(result.report.events[1].node_id, "prompt");
+        assert_eq!(result.report.events[1].status, NodeStatusWire::Complete);
+        assert_eq!(result.report.events[2].node_id, "output");
+        assert_eq!(result.report.events[2].status, NodeStatusWire::Loading);
+        assert_eq!(result.report.events[3].node_id, "output");
+        assert_eq!(result.report.events[3].status, NodeStatusWire::Complete);
+    }
+
+    #[test]
     fn provider_nodes_are_explicitly_skipped() {
         let workflow = WorkflowFile::example();
         let result = execute_simple_workflow(&workflow).expect("executes");
@@ -1085,7 +1156,18 @@ mod tests {
             Some("skipped")
         );
         assert_eq!(output.data.get("text").and_then(Value::as_str), None);
+        assert_eq!(result.report.loading_count(), 2);
         assert_eq!(result.report.skipped_count(), 1);
+        assert_eq!(
+            result
+                .report
+                .events
+                .iter()
+                .filter(|event| event.node_id == "prompt")
+                .map(|event| event.status)
+                .collect::<Vec<_>>(),
+            vec![NodeStatusWire::Loading, NodeStatusWire::Skipped]
+        );
     }
 
     #[test]
