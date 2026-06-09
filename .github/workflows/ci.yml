@@ -179,10 +179,18 @@ jobs:
             os: ubuntu-latest
             target: linux-desktop
             command: dx build --desktop --features desktop
+          - name: Linux desktop providers-http build
+            os: ubuntu-latest
+            target: linux-desktop-providers-http
+            command: dx build --desktop --features desktop,providers-http
           - name: Windows desktop build
             os: windows-latest
             target: windows-desktop
             command: dx build --desktop --features desktop
+          - name: Windows desktop providers-http build
+            os: windows-latest
+            target: windows-desktop-providers-http
+            command: dx build --desktop --features desktop,providers-http
           - name: Linux desktop bundle
             os: ubuntu-latest
             target: linux-desktop-bundle
@@ -205,7 +213,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install Linux desktop dependencies
-        if: matrix.target == 'linux-desktop' || matrix.target == 'linux-desktop-bundle'
+        if: matrix.target == 'linux-desktop' || matrix.target == 'linux-desktop-providers-http' || matrix.target == 'linux-desktop-bundle'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \

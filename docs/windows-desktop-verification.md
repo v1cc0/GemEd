@@ -8,6 +8,7 @@ The GitHub Actions Dioxus matrix includes both Windows build and bundle jobs on 
 
 ```bash
 dx build --desktop --features desktop
+dx build --desktop --features desktop,providers-http
 dx bundle --desktop --features desktop,bundle --package-types msi
 ```
 
@@ -15,8 +16,10 @@ Each Dioxus matrix job uploads an artifact named from its matrix target:
 
 - `gemed-web-dx-build`
 - `gemed-linux-desktop-dx-build`
+- `gemed-linux-desktop-providers-http-dx-build`
 - `gemed-linux-desktop-bundle-dx-build`
 - `gemed-windows-desktop-dx-build`
+- `gemed-windows-desktop-providers-http-dx-build`
 - `gemed-windows-desktop-bundle-dx-build`
 
 The artifact contains:
@@ -36,6 +39,17 @@ Record the Windows build result here when it exists:
 | GitHub Actions run URL | pending |
 | Matrix job | `Windows desktop build` |
 | Artifact | `gemed-windows-desktop-dx-build` |
+| Result | pending |
+| Notes | pending |
+
+Record the Windows providers-http build result here when it exists:
+
+| Field | Value |
+| --- | --- |
+| Commit SHA | pending |
+| GitHub Actions run URL | pending |
+| Matrix job | `Windows desktop providers-http build` |
+| Artifact | `gemed-windows-desktop-providers-http-dx-build` |
 | Result | pending |
 | Notes | pending |
 
