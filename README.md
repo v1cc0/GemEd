@@ -32,7 +32,7 @@ Implemented now:
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
 - Web and Linux desktop build verification
-- Windows desktop foundation through Dioxus desktop feature and Windows GUI subsystem setting
+- Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, CI build matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
 
 Not implemented yet:
 

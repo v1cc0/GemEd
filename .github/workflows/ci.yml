@@ -98,5 +98,45 @@ jobs:
       - name: Install Dioxus CLI
         run: cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
 
+      - name: Record tool versions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "ci-artifacts/${{ matrix.target }}" | Out-Null
+          rustc -Vv | Tee-Object -FilePath "ci-artifacts/${{ matrix.target }}/rustc-version.txt"
+          cargo -V | Tee-Object -FilePath "ci-artifacts/${{ matrix.target }}/cargo-version.txt"
+          dx --version | Tee-Object -FilePath "ci-artifacts/${{ matrix.target }}/dioxus-version.txt"
+
       - name: Build
         run: ${{ matrix.command }}
+
+      - name: Collect Dioxus build evidence
+        shell: pwsh
+        run: |
+          $artifactDir = "ci-artifacts/${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $candidateRoots = @(
+            "target/dx/gemed/debug",
+            "$env:HOME/.cargo/target/dx/gemed/debug",
+            "$env:USERPROFILE/.cargo/target/dx/gemed/debug"
+          )
+          $found = $false
+          foreach ($root in $candidateRoots) {
+            if ($root -and (Test-Path $root)) {
+              $found = $true
+              $safeName = ($root -replace '[:\\/]+', '_').Trim('_')
+              Copy-Item -Recurse -Force $root "$artifactDir/$safeName"
+              Get-ChildItem -Recurse $root | Select-Object FullName, Length |
+                Out-File "$artifactDir/${safeName}-manifest.txt"
+            }
+          }
+          if (-not $found) {
+            "No Dioxus output directory found in candidate roots." |
+              Out-File "$artifactDir/no-dioxus-output-found.txt"
+          }
+
+      - name: Upload Dioxus build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemed-${{ matrix.target }}-dx-build
+          path: ci-artifacts/${{ matrix.target }}
+          if-no-files-found: warn
