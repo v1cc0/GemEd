@@ -1,6 +1,6 @@
 # Windows desktop verification
 
-This document is the evidence checklist for the Windows desktop target. Treat CI build/package verification and interactive WebView2 smoke as separate gates; do not mark interactive Windows desktop behavior as verified until a Windows machine or UI runner launches the app and completes the local smoke below.
+This document is the evidence checklist for the Windows desktop target. Treat CI build/package verification, the automated WebView2 adapter self-smoke, and final physical-machine bundled-app click testing as separate gates.
 
 ## CI evidence
 
@@ -70,12 +70,13 @@ Record the Windows WebView2 self-smoke result here when it exists:
 
 | Field | Value |
 | --- | --- |
-| Commit SHA | pending |
-| GitHub Actions run URL | pending |
+| Commit SHA | `c0ded944d693f1f9889340f0c63c1f3a380a4f69` |
+| GitHub Actions run URL | <https://github.com/v1cc0/GemEd/actions/runs/27221485574> |
 | Job | `Windows desktop WebView2 self-smoke` |
+| Job URL | <https://github.com/v1cc0/GemEd/actions/runs/27221485574/job/80377184715> |
 | Artifact | `gemed-windows-webview2-self-smoke` |
-| Result | pending |
-| Notes | Pending opt-in `workflow_dispatch` run with `windows_webview_smoke=true`. Expected PASS marker includes `Frame Sample capture PASS 16×16, routed 1` and `Media Sample GLB capture PASS 640×480, routed 1`. |
+| Result | success |
+| Notes | Manual `workflow_dispatch` run with `windows_webview_smoke=true` launched the real Dioxus Desktop app through WebView2 and completed `GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop`. Artifact log contains `[gemed-desktop-self-smoke] PASS Frame Sample capture PASS 16×16, routed 1; Media Sample GLB capture PASS 640×480, routed 1.` Tool evidence: `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-pc-windows-msvc`, `cargo 1.96.0`. |
 
 Record the Windows bundle result here when it exists:
 
@@ -117,4 +118,4 @@ Then launch the built app or `dx serve --desktop --features desktop` and verify:
 
 ## Current status
 
-Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. A manual Windows WebView2 self-smoke job is now available but remains pending until a `workflow_dispatch` run with `windows_webview_smoke=true` completes. Windows remains a foundation target rather than full interactive verification until that job or a local Windows machine/UI runner completes the WebView2 smoke checklist above. Linux desktop builds, Linux `.deb` bundle, web build, Chromium web interaction smoke, and native Linux WebKitGTK Frame/GLB adapter self-smoke are verified; the Linux self-smoke does not prove Windows WebView2 behavior.
+Windows CI build, `providers-http` build, MSI bundle, and automated WebView2 Frame/GLB adapter self-smoke evidence are now filled from real `windows-latest` runners. Windows remains a foundation target rather than fully polished release target until a physical Windows machine verifies the bundled installer launch and human click checklist above. Linux desktop builds, Linux `.deb` bundle, web build, Chromium web interaction smoke, native Linux WebKitGTK Frame/GLB adapter self-smoke, and Windows WebView2 Frame/GLB adapter self-smoke are verified.

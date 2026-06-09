@@ -1,11 +1,12 @@
 # WebView and browser media interaction smoke
 
-This document records two adapter smokes:
+This document records three adapter smokes:
 
 - Web target: real Chromium clicks against `dx serve --web`, with Playwright kept outside the repo.
 - Linux desktop target: a native Dioxus Desktop/WebKitGTK self-smoke triggered by `GEMED_DESKTOP_SELF_SMOKE=1`.
+- Windows desktop target: an opt-in GitHub Actions Dioxus Desktop/WebView2 self-smoke triggered by `windows_webview_smoke=true`.
 
-These checks cover the browser/WebView adapters used by the current Frame Sample and GLB viewer flows. They do **not** replace Windows WebView2 evidence; Windows still needs a Windows machine or UI runner to launch and click the app.
+These checks cover the browser/WebView adapters used by the current Frame Sample and GLB viewer flows. The Windows CI self-smoke proves the real WebView2 adapter boundary for the current app; a physical Windows machine is still useful for final bundled-installer human click testing.
 
 ## Web target: start the deterministic server
 
@@ -36,7 +37,7 @@ Both should return `HTTP/1.1 200 OK`.
 5. Clicks runnable execution paths in Chromium: starter `Run Local`, mock `Run Providers`, Frame Sample `Capture`, and Media Sample GLB `Capture PNG`.
 6. Uploads the Dioxus server log and any Playwright evidence as the `gemed-web-interaction-smoke` artifact.
 
-This CI job is web/Chromium evidence only. Native Linux desktop WebView evidence is covered separately by the self-smoke below; Windows WebView2 click evidence still requires a Windows desktop run.
+This CI job is web/Chromium evidence only. Native Linux desktop WebView evidence is covered separately by the self-smoke below; Windows WebView2 evidence is covered by the opt-in Windows self-smoke documented in `docs/windows-desktop-verification.md`.
 
 ## Web target: run isolated Playwright smoke
 
@@ -173,5 +174,39 @@ On 2026-06-09, from this repo state:
 - `rtk dx serve --desktop --features desktop` launched a native `gemed-*` app process and WebKitGTK `WebKitNetworkProcess` / `WebKitWebProcess`; Niri reported a real `GemEd` window with app ID `gemed-5175b724`.
 - `xdotool search --name GemEd` did not see the native Wayland window, so external click automation was not reliable evidence on this host.
 - `rtk timeout 180s env GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop` exited `0` with:
+  - `Frame Sample capture PASS 16×16, routed 1`
+  - `Media Sample GLB capture PASS 640×480, routed 1`
+
+
+## Windows desktop target: WebView2 self-smoke
+
+For native Windows desktop WebView validation, trigger the manual GitHub Actions workflow with the opt-in input:
+
+```bash
+rtk gh workflow run 292131199 --ref main -f windows_webview_smoke=true
+```
+
+The job runs on `windows-latest`:
+
+```powershell
+$env:GEMED_DESKTOP_SELF_SMOKE = "1"
+cargo run --features desktop
+```
+
+Expected decisive output:
+
+```text
+[gemed-desktop-self-smoke] START env=GEMED_DESKTOP_SELF_SMOKE=1 target=desktop-webview
+[gemed-desktop-self-smoke] PASS Frame Sample capture PASS 16×16, routed 1; Media Sample GLB capture PASS 640×480, routed 1.
+```
+
+### Current Windows desktop evidence
+
+On 2026-06-09, workflow run <https://github.com/v1cc0/GemEd/actions/runs/27221485574> at commit `c0ded944d693f1f9889340f0c63c1f3a380a4f69` completed job `Windows desktop WebView2 self-smoke` successfully:
+
+- Job URL: <https://github.com/v1cc0/GemEd/actions/runs/27221485574/job/80377184715>
+- Artifact: `gemed-windows-webview2-self-smoke`
+- Tool evidence: `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-pc-windows-msvc`, `cargo 1.96.0`
+- PASS marker:
   - `Frame Sample capture PASS 16×16, routed 1`
   - `Media Sample GLB capture PASS 640×480, routed 1`
