@@ -34,7 +34,7 @@ Implemented now:
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
 - Web, Linux desktop, and Linux `.deb` bundle verification
 - Rust release-smoke coverage for opening a built-in example, creating/connecting a workflow, save/load through storage, running a no-provider workflow, and running the mock provider sample
-- Real Chromium web interaction smoke for Frame Sample `Capture`, local-first GLB preview, and GLB `Capture PNG`; see `docs/webview-interaction-smoke.md`
+- Real Chromium web interaction smoke for Run Local progress, mock Run Providers outputs, Frame Sample `Capture`, local-first GLB preview, and GLB `Capture PNG`; see `docs/webview-interaction-smoke.md`
 - Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, app/bundle icon configuration, CI build/bundle matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
 
 Not implemented yet:
@@ -86,7 +86,7 @@ For deterministic offline provider verification, click `Provider Sample`, click 
 
 For a narrower opt-in live provider check outside the UI, use `docs/provider-live-smoke.md`. The smoke fixture calls the same Rust Gemini/OpenAI/Anthropic LLM HTTP backends and reports only provider/model/response previews, never secret values.
 
-For browser media interaction validation, use `docs/webview-interaction-smoke.md`. The current smoke clicks `Frame Sample` capture and `Media Sample` GLB `Capture PNG` in real Chromium while keeping Playwright outside the repo.
+For browser interaction validation, use `docs/webview-interaction-smoke.md`. The current smoke clicks starter `Run Local`, mock `Run Providers`, `Frame Sample` capture, and `Media Sample` GLB `Capture PNG` in real Chromium while keeping Playwright outside the repo.
 
 For release-style build artifacts:
 
