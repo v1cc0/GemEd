@@ -21,6 +21,20 @@ rtk curl -I http://127.0.0.1:4563/vendor/model-viewer/4.3.1/model-viewer.min.js
 
 Both should return `HTTP/1.1 200 OK`.
 
+
+## CI smoke
+
+`.github/workflows/ci.yml` includes a `Web interaction smoke` job that runs the same browser-side contract in CI without committing Playwright metadata to the repo:
+
+1. Installs Rust, the WASM target, and the pinned Dioxus CLI.
+2. Creates an isolated Playwright project under the runner temp directory.
+3. Starts the deterministic Dioxus web server on `127.0.0.1:4564` with hot patching and hot reload disabled.
+4. Waits until both `/` and `/vendor/model-viewer/4.3.1/model-viewer.min.js` return `200 OK`.
+5. Clicks the Frame Sample `Capture` and Media Sample GLB `Capture PNG` flows in Chromium.
+6. Uploads the Dioxus server log and any Playwright evidence as the `gemed-web-interaction-smoke` artifact.
+
+This CI job is web/Chromium evidence only. Native Linux desktop WebView and Windows WebView2 click evidence still require native desktop runs.
+
 ## Run isolated Playwright smoke
 
 Create the temporary harness outside the repo so the legacy Next.js `package.json` and lockfile stay untouched:

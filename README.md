@@ -115,7 +115,7 @@ cargo clippy --workspace --all-targets --no-default-features --features web -- -
 cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 ```
 
-CI mirrors these gates and runs a Dioxus matrix for web build, Linux/Windows desktop builds, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`.
+CI mirrors these gates, runs the web interaction smoke in Chromium, and runs a Dioxus matrix for web build, Linux/Windows desktop builds, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`.
 
 ## Notes
 
