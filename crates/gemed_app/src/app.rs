@@ -327,6 +327,25 @@ fn Header(
                     "Transform Sample"
                 }
                 button {
+                    class: "action",
+                    onclick: move |_| {
+                        let next = WorkflowFile::llm_provider_example();
+                        match next.to_pretty_json() {
+                            Ok(json) => {
+                                workflow.set(next);
+                                json_text.set(json);
+                                execution_report.set(None);
+                                undo_stack.write().clear();
+                                drag_state.set(None);
+                                connection_draft.set(None);
+                                message.set(Message::ok("Loaded built-in LLM provider sample. Use Mock Defaults + Run Providers for offline coverage, or Env + providers-http for opt-in live desktop calls."));
+                            }
+                            Err(err) => message.set(Message::err(format!("Failed to serialize provider sample workflow: {err}"))),
+                        }
+                    },
+                    "Provider Sample"
+                }
+                button {
                     class: "action primary",
                     onclick: move |_| match WorkflowFile::from_json_str(&json_text.read()) {
                         Ok(parsed) => {
@@ -3919,6 +3938,37 @@ mod tests {
         assert!(media_overlay_from_preview(&model_preview).is_none());
         assert!(media_overlay_from_preview(&project_ref_preview).is_none());
         assert!(media_overlay_from_preview(&large_inline_preview).is_none());
+    }
+
+    #[test]
+    fn provider_sample_runs_offline_with_mock_defaults() {
+        let workflow = WorkflowFile::llm_provider_example();
+        let providers = gemed_providers::ProviderRegistry::mock_from_config(
+            &gemed_providers::ProviderConfigSet::mock_all(),
+        );
+
+        let result = gemed_executor::execute_workflow_with_providers(&workflow, &providers)
+            .expect("provider sample runs through mock registry");
+
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+        for node_id in [
+            "provider_gemini_output",
+            "provider_openai_output",
+            "provider_anthropic_output",
+        ] {
+            assert!(
+                result
+                    .workflow
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == node_id)
+                    .and_then(|node| node.data.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.starts_with("[mock:")),
+                "{node_id} should receive deterministic mock provider text"
+            );
+        }
     }
 
     #[cfg(feature = "desktop")]

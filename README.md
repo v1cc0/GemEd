@@ -13,11 +13,11 @@ Implemented now:
 - Typed node-handle metadata in `gemed_core` for canvas connection UI
 - Graph traversal, connected-input resolution, and topological execution ordering
 - Local simple executor for prompt, array, prompt-constructor, output, gallery, annotation, image compare metadata, inline split-grid image cells, and control nodes
-- Built-in starter, Media Sample, and Transform Sample workflows
+- Built-in starter, Media Sample, Transform Sample, and LLM Provider Sample workflows
 - JSON editor that loads and validates workflow JSON
 - SVG/HTML canvas rendering nodes and edges
 - Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, drag-to-move group headers, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
-- Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
+- Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes, including an offline LLM Provider Sample that exercises Gemini/OpenAI/Anthropic routing without real API calls
 - Optional desktop LLM HTTP backends behind the `providers-http` feature: Gemini GenerateContent via `GEMINI_API_KEY`, OpenAI Responses via `OPENAI_API_KEY`, and Anthropic Messages via `ANTHROPIC_API_KEY`; normal builds keep network/provider calls out unless explicitly enabled
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
 - Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
@@ -78,6 +78,8 @@ GEMINI_API_KEY=... OPENAI_API_KEY=... ANTHROPIC_API_KEY=... dx serve --desktop -
 ```
 
 In the app, set Gemini, OpenAI, or Anthropic to the platform/env mode in Provider Settings and run an LLM node with provider `gemini`, `openai`, or `anthropic`. Gemini defaults to GenerateContent with `gemini-3.5-flash`; Anthropic defaults to Messages API with `claude-sonnet-4-6` when the workflow does not provide a concrete model. The regular desktop and web commands do not include live provider HTTP clients.
+
+For deterministic offline provider verification, click `Provider Sample`, click `Mock Defaults` in Provider Settings, then click `Run Providers`. The three output nodes should receive mock text for `gemini`, `openai`, and `anthropic`. For opt-in live desktop LLM verification, launch with `--features desktop,providers-http`, set the same providers to `Env`, export the matching environment variables, and run the same sample.
 
 For release-style build artifacts:
 

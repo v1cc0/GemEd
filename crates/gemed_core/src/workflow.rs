@@ -194,6 +194,147 @@ impl WorkflowFile {
         }
     }
 
+    pub fn llm_provider_example() -> Self {
+        Self {
+            name: "GemEd LLM Provider Sample".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "provider_prompt",
+                    NodeType::Prompt,
+                    Position { x: 80.0, y: 220.0 },
+                    serde_json::json!({
+                        "label": "Shared Prompt",
+                        "status": "idle",
+                        "prompt": "Write one concise sentence about a portable visual AI workflow editor."
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_gemini",
+                    NodeType::LlmGenerate,
+                    Position { x: 430.0, y: 60.0 },
+                    serde_json::json!({
+                        "label": "Gemini LLM",
+                        "status": "idle",
+                        "provider": "gemini",
+                        "model": "gemini-3.5-flash",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "outputText": null,
+                        "temperature": 0.2,
+                        "maxTokens": 128,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_openai",
+                    NodeType::LlmGenerate,
+                    Position { x: 430.0, y: 240.0 },
+                    serde_json::json!({
+                        "label": "OpenAI LLM",
+                        "status": "idle",
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "outputText": null,
+                        "temperature": 0.2,
+                        "maxTokens": 128,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_anthropic",
+                    NodeType::LlmGenerate,
+                    Position { x: 430.0, y: 420.0 },
+                    serde_json::json!({
+                        "label": "Anthropic LLM",
+                        "status": "idle",
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-6",
+                        "inputPrompt": null,
+                        "inputImages": [],
+                        "outputText": null,
+                        "temperature": 0.2,
+                        "maxTokens": 128,
+                        "parameters": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_gemini_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 70.0 },
+                    serde_json::json!({
+                        "label": "Gemini Text Output",
+                        "status": "idle"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_openai_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 250.0 },
+                    serde_json::json!({
+                        "label": "OpenAI Text Output",
+                        "status": "idle"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "provider_anthropic_output",
+                    NodeType::Output,
+                    Position { x: 800.0, y: 430.0 },
+                    serde_json::json!({
+                        "label": "Anthropic Text Output",
+                        "status": "idle"
+                    }),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles(
+                    "edge_provider_prompt_gemini",
+                    "provider_prompt",
+                    "provider_gemini",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_prompt_openai",
+                    "provider_prompt",
+                    "provider_openai",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_prompt_anthropic",
+                    "provider_prompt",
+                    "provider_anthropic",
+                    "text",
+                    "prompt",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_gemini_output",
+                    "provider_gemini",
+                    "provider_gemini_output",
+                    "text",
+                    "text",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_openai_output",
+                    "provider_openai",
+                    "provider_openai_output",
+                    "text",
+                    "text",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_provider_anthropic_output",
+                    "provider_anthropic",
+                    "provider_anthropic_output",
+                    "text",
+                    "text",
+                ),
+            ],
+            ..Self::blank()
+        }
+    }
+
     pub fn media_transform_example() -> Self {
         Self {
             name: "GemEd Media Transform Sample".to_string(),
@@ -869,6 +1010,26 @@ mod tests {
 
         let json = workflow.to_pretty_json().expect("serialize media sample");
         let parsed = WorkflowFile::from_json_str(&json).expect("parse media sample");
+        assert_eq!(parsed, workflow);
+    }
+
+    #[test]
+    fn llm_provider_sample_workflow_is_valid_and_roundtrips() {
+        let workflow = WorkflowFile::llm_provider_example();
+        workflow.validate().expect("provider sample validates");
+        assert_eq!(workflow.nodes.len(), 7);
+        assert_eq!(workflow.edges.len(), 6);
+        for provider in ["gemini", "openai", "anthropic"] {
+            assert!(workflow.nodes.iter().any(|node| {
+                node.node_type == NodeType::LlmGenerate
+                    && node.data.get("provider").and_then(Value::as_str) == Some(provider)
+            }));
+        }
+
+        let json = workflow
+            .to_pretty_json()
+            .expect("serialize provider sample");
+        let parsed = WorkflowFile::from_json_str(&json).expect("parse provider sample");
         assert_eq!(parsed, workflow);
     }
 

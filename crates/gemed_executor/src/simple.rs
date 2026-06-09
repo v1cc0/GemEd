@@ -901,6 +901,43 @@ mod tests {
     }
 
     #[test]
+    fn provider_sample_runs_all_llm_routes_with_mock_registry() {
+        let workflow = WorkflowFile::llm_provider_example();
+        let providers = ProviderRegistry::mock_all();
+
+        let result =
+            execute_workflow_with_providers(&workflow, &providers).expect("mock providers execute");
+
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+        for (node_id, provider, model) in [
+            ("provider_gemini_output", "gemini", "gemini-3.5-flash"),
+            ("provider_openai_output", "openai", "gpt-5.5"),
+            (
+                "provider_anthropic_output",
+                "anthropic",
+                "claude-sonnet-4-6",
+            ),
+        ] {
+            let output = result
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .expect("provider output node exists");
+            let text = output
+                .data
+                .get("text")
+                .and_then(Value::as_str)
+                .expect("provider output text is routed");
+            assert!(
+                text.starts_with(&format!("[mock:{provider}:{model}]")),
+                "unexpected output for {node_id}: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn mock_image_provider_executes_generation_node() {
         let workflow = WorkflowFile {
             name: "mock image".to_string(),
