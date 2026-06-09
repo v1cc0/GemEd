@@ -211,6 +211,24 @@ impl ProviderConfig {
         }
     }
 
+    pub fn web_backend(
+        id: ProviderId,
+        binding: impl Into<String>,
+        base_url: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.clone(),
+            enabled: true,
+            runtime_mode: ProviderRuntimeMode::WebBackend,
+            secret_source: ProviderSecretSource::WebBackend {
+                binding: binding.into(),
+            },
+            base_url,
+            default_model: None,
+            capabilities: default_capabilities(&id),
+        }
+    }
+
     pub fn disabled(id: ProviderId) -> Self {
         Self {
             id: id.clone(),
@@ -289,6 +307,19 @@ impl ProviderConfigSet {
             ProviderConfig::direct_desktop_env(ProviderId::Fal, "FAL_KEY", None),
             ProviderConfig::direct_desktop_env(ProviderId::Kie, "KIE_API_KEY", None),
             ProviderConfig::direct_desktop_env(ProviderId::WaveSpeed, "WAVESPEED_API_KEY", None),
+        ])
+    }
+
+    pub fn web_backend_defaults() -> Self {
+        Self::new(vec![
+            ProviderConfig::web_backend(ProviderId::Gemini, "GEMINI_API_KEY", None),
+            ProviderConfig::web_backend(ProviderId::Google, "GOOGLE_API_KEY", None),
+            ProviderConfig::web_backend(ProviderId::OpenAi, "OPENAI_API_KEY", None),
+            ProviderConfig::web_backend(ProviderId::Anthropic, "ANTHROPIC_API_KEY", None),
+            ProviderConfig::web_backend(ProviderId::Replicate, "REPLICATE_API_TOKEN", None),
+            ProviderConfig::web_backend(ProviderId::Fal, "FAL_KEY", None),
+            ProviderConfig::web_backend(ProviderId::Kie, "KIE_API_KEY", None),
+            ProviderConfig::web_backend(ProviderId::WaveSpeed, "WAVESPEED_API_KEY", None),
         ])
     }
 

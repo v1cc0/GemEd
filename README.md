@@ -19,6 +19,7 @@ Implemented now:
 - Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, drag-to-move group headers, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
+- Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
@@ -31,7 +32,7 @@ Not implemented yet:
 
 - Full editable canvas UX: polished drag/handle affordances
 - Live Provider/API execution beyond mock providers
-- Provider secret UI, OS keychain persistence, and web backend/server-function execution
+- Provider secret entry, OS keychain persistence, and web backend/server-function execution
 - Media/video/3D nodes
 - Media storage polish: richer media capability handling and node-specific media UI affordances
 

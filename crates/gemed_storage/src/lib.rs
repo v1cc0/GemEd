@@ -1,9 +1,13 @@
 use gemed_core::{WorkflowError, WorkflowFile};
+use gemed_providers::ProviderConfigSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const DEFAULT_AUTOSAVE_SLOT: &str = "autosave";
+pub const DEFAULT_PROVIDER_CONFIG_SLOT: &str = "providers";
+pub const PROVIDER_CONFIG_SCHEMA_VERSION: u8 = 1;
+pub const PROVIDER_CONFIG_DIR: &str = "provider-configs";
 pub const PROJECT_SCHEMA_VERSION: u8 = 1;
 pub const PROJECT_MANIFEST_FILE: &str = "gemed-project.json";
 pub const PROJECT_WORKFLOW_FILE: &str = "workflow.json";
@@ -55,6 +59,52 @@ impl WorkflowSnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigFile {
+    pub version: u8,
+    pub provider_config: ProviderConfigSet,
+}
+
+impl ProviderConfigFile {
+    pub fn new(provider_config: ProviderConfigSet) -> Self {
+        Self {
+            version: PROVIDER_CONFIG_SCHEMA_VERSION,
+            provider_config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConfigSnapshot {
+    pub slot: String,
+    pub json: String,
+}
+
+impl ProviderConfigSnapshot {
+    pub fn from_config(slot: impl Into<String>, config: &ProviderConfigSet) -> Result<Self> {
+        let slot = normalize_slot(&slot.into())?;
+        let payload = ProviderConfigFile::new(config.clone());
+        let json = serde_json::to_string_pretty(&payload).map_err(|source| {
+            StorageError::Backend(format!("provider config export failed: {source}"))
+        })?;
+        Ok(Self { slot, json })
+    }
+
+    pub fn parse(&self) -> Result<ProviderConfigSet> {
+        let payload: ProviderConfigFile = serde_json::from_str(&self.json).map_err(|source| {
+            StorageError::Backend(format!("provider config parse failed: {source}"))
+        })?;
+        if payload.version != PROVIDER_CONFIG_SCHEMA_VERSION {
+            return Err(StorageError::Backend(format!(
+                "provider config version `{}` is not supported",
+                payload.version
+            )));
+        }
+        Ok(payload.provider_config)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error(transparent)]
@@ -88,9 +138,21 @@ pub trait WorkflowStorage {
     fn delete_workflow(&mut self, slot: &str) -> Result<()>;
 }
 
+pub trait ProviderConfigStorage {
+    fn save_provider_config(
+        &mut self,
+        slot: &str,
+        config: &ProviderConfigSet,
+    ) -> Result<ProviderConfigSnapshot>;
+    fn load_provider_config(&self, slot: &str) -> Result<ProviderConfigSet>;
+    fn list_provider_configs(&self) -> Result<Vec<ProviderConfigSnapshot>>;
+    fn delete_provider_config(&mut self, slot: &str) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MemoryWorkflowStorage {
     snapshots: BTreeMap<String, WorkflowSnapshot>,
+    provider_configs: BTreeMap<String, ProviderConfigSnapshot>,
 }
 
 impl MemoryWorkflowStorage {
@@ -134,16 +196,51 @@ impl WorkflowStorage for MemoryWorkflowStorage {
     }
 }
 
+impl ProviderConfigStorage for MemoryWorkflowStorage {
+    fn save_provider_config(
+        &mut self,
+        slot: &str,
+        config: &ProviderConfigSet,
+    ) -> Result<ProviderConfigSnapshot> {
+        let snapshot = ProviderConfigSnapshot::from_config(slot, config)?;
+        self.provider_configs
+            .insert(snapshot.slot.clone(), snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn load_provider_config(&self, slot: &str) -> Result<ProviderConfigSet> {
+        let slot = normalize_slot(slot)?;
+        self.provider_configs
+            .get(&slot)
+            .ok_or_else(|| StorageError::NotFound(slot.clone()))?
+            .parse()
+    }
+
+    fn list_provider_configs(&self) -> Result<Vec<ProviderConfigSnapshot>> {
+        Ok(self.provider_configs.values().cloned().collect())
+    }
+
+    fn delete_provider_config(&mut self, slot: &str) -> Result<()> {
+        let slot = normalize_slot(slot)?;
+        self.provider_configs
+            .remove(&slot)
+            .map(|_| ())
+            .ok_or(StorageError::NotFound(slot))
+    }
+}
+
 #[cfg(feature = "desktop")]
 pub mod desktop {
     use super::{
-        DEFAULT_AUTOSAVE_SLOT, PROJECT_MANIFEST_FILE, PROJECT_MEDIA_DIR, PROJECT_MEDIA_URL_PREFIX,
-        PROJECT_WORKFLOW_FILE, Result, StorageError, WorkflowProjectManifest, WorkflowSnapshot,
-        WorkflowStorage, normalize_slot,
+        DEFAULT_AUTOSAVE_SLOT, DEFAULT_PROVIDER_CONFIG_SLOT, PROJECT_MANIFEST_FILE,
+        PROJECT_MEDIA_DIR, PROJECT_MEDIA_URL_PREFIX, PROJECT_WORKFLOW_FILE, PROVIDER_CONFIG_DIR,
+        ProviderConfigSnapshot, ProviderConfigStorage, Result, StorageError,
+        WorkflowProjectManifest, WorkflowSnapshot, WorkflowStorage, normalize_slot,
     };
     use base64::{Engine as _, engine::general_purpose};
     use directories::ProjectDirs;
     use gemed_core::WorkflowFile;
+    use gemed_providers::ProviderConfigSet;
     use serde_json::Value;
     use std::collections::HashSet;
     use std::path::{Component, Path, PathBuf};
@@ -172,8 +269,22 @@ pub mod desktop {
             self.path_for_slot(DEFAULT_AUTOSAVE_SLOT)
         }
 
+        pub fn default_provider_config_path(&self) -> Result<PathBuf> {
+            self.path_for_provider_config_slot(DEFAULT_PROVIDER_CONFIG_SLOT)
+        }
+
         fn path_for_slot(&self, slot: &str) -> Result<PathBuf> {
             Ok(self.root.join(format!("{}.json", normalize_slot(slot)?)))
+        }
+
+        fn provider_config_root(&self) -> PathBuf {
+            self.root.join(PROVIDER_CONFIG_DIR)
+        }
+
+        fn path_for_provider_config_slot(&self, slot: &str) -> Result<PathBuf> {
+            Ok(self
+                .provider_config_root()
+                .join(format!("{}.json", normalize_slot(slot)?)))
         }
 
         fn ensure_root(&self) -> Result<()> {
@@ -181,6 +292,15 @@ pub mod desktop {
                 path: self.root.clone(),
                 source,
             })
+        }
+
+        fn ensure_provider_config_root(&self) -> Result<PathBuf> {
+            let root = self.provider_config_root();
+            std::fs::create_dir_all(&root).map_err(|source| StorageError::Io {
+                path: root.clone(),
+                source,
+            })?;
+            Ok(root)
         }
     }
 
@@ -247,6 +367,78 @@ pub mod desktop {
 
         fn delete_workflow(&mut self, slot: &str) -> Result<()> {
             let path = self.path_for_slot(slot)?;
+            if !path.exists() {
+                return Err(StorageError::NotFound(normalize_slot(slot)?));
+            }
+            std::fs::remove_file(&path).map_err(|source| StorageError::Io { path, source })
+        }
+    }
+
+    impl ProviderConfigStorage for DesktopWorkflowStorage {
+        fn save_provider_config(
+            &mut self,
+            slot: &str,
+            config: &ProviderConfigSet,
+        ) -> Result<ProviderConfigSnapshot> {
+            self.ensure_provider_config_root()?;
+            let snapshot = ProviderConfigSnapshot::from_config(slot, config)?;
+            let path = self.path_for_provider_config_slot(&snapshot.slot)?;
+            std::fs::write(&path, snapshot.json.as_bytes())
+                .map_err(|source| StorageError::Io { path, source })?;
+            Ok(snapshot)
+        }
+
+        fn load_provider_config(&self, slot: &str) -> Result<ProviderConfigSet> {
+            let path = self.path_for_provider_config_slot(slot)?;
+            let json = std::fs::read_to_string(&path).map_err(|source| StorageError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            ProviderConfigSnapshot {
+                slot: normalize_slot(slot)?,
+                json,
+            }
+            .parse()
+        }
+
+        fn list_provider_configs(&self) -> Result<Vec<ProviderConfigSnapshot>> {
+            let root = self.provider_config_root();
+            if !root.exists() {
+                return Ok(Vec::new());
+            }
+            let entries = std::fs::read_dir(&root).map_err(|source| StorageError::Io {
+                path: root.clone(),
+                source,
+            })?;
+            let mut snapshots = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|source| StorageError::Io {
+                    path: root.clone(),
+                    source,
+                })?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let json = std::fs::read_to_string(&path).map_err(|source| StorageError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let slot = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(DEFAULT_PROVIDER_CONFIG_SLOT)
+                    .to_string();
+                let snapshot = ProviderConfigSnapshot { slot, json };
+                let _ = snapshot.parse()?;
+                snapshots.push(snapshot);
+            }
+            snapshots.sort_by(|left, right| left.slot.cmp(&right.slot));
+            Ok(snapshots)
+        }
+
+        fn delete_provider_config(&mut self, slot: &str) -> Result<()> {
+            let path = self.path_for_provider_config_slot(slot)?;
             if !path.exists() {
                 return Err(StorageError::NotFound(normalize_slot(slot)?));
             }
@@ -802,10 +994,15 @@ pub mod desktop {
 
 #[cfg(feature = "web")]
 pub mod web {
-    use super::{Result, StorageError, WorkflowSnapshot, WorkflowStorage, normalize_slot};
+    use super::{
+        ProviderConfigSnapshot, ProviderConfigStorage, Result, StorageError, WorkflowSnapshot,
+        WorkflowStorage, normalize_slot,
+    };
     use gemed_core::WorkflowFile;
+    use gemed_providers::ProviderConfigSet;
 
     const STORAGE_PREFIX: &str = "gemed.workflow.";
+    const PROVIDER_CONFIG_STORAGE_PREFIX: &str = "gemed.providerConfig.";
 
     #[derive(Debug, Clone, Default)]
     pub struct WebLocalStorage {
@@ -827,6 +1024,14 @@ pub mod web {
 
         fn key(&self, slot: &str) -> Result<String> {
             Ok(format!("{}{}", self.namespace, normalize_slot(slot)?))
+        }
+
+        fn provider_config_key(&self, slot: &str) -> Result<String> {
+            Ok(format!(
+                "{}{}",
+                PROVIDER_CONFIG_STORAGE_PREFIX,
+                normalize_slot(slot)?
+            ))
         }
 
         fn storage(&self) -> Result<web_sys::Storage> {
@@ -912,6 +1117,95 @@ pub mod web {
             })
         }
     }
+
+    impl ProviderConfigStorage for WebLocalStorage {
+        fn save_provider_config(
+            &mut self,
+            slot: &str,
+            config: &ProviderConfigSet,
+        ) -> Result<ProviderConfigSnapshot> {
+            let snapshot = ProviderConfigSnapshot::from_config(slot, config)?;
+            let key = self.provider_config_key(&snapshot.slot)?;
+            self.storage()?
+                .set_item(&key, &snapshot.json)
+                .map_err(|err| {
+                    StorageError::Backend(format!(
+                        "localStorage provider config save failed: {err:?}"
+                    ))
+                })?;
+            Ok(snapshot)
+        }
+
+        fn load_provider_config(&self, slot: &str) -> Result<ProviderConfigSet> {
+            let key = self.provider_config_key(slot)?;
+            let json = self
+                .storage()?
+                .get_item(&key)
+                .map_err(|err| {
+                    StorageError::Backend(format!(
+                        "localStorage provider config load failed: {err:?}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    StorageError::NotFound(
+                        normalize_slot(slot).unwrap_or_else(|_| slot.to_string()),
+                    )
+                })?;
+            ProviderConfigSnapshot {
+                slot: normalize_slot(slot)?,
+                json,
+            }
+            .parse()
+        }
+
+        fn list_provider_configs(&self) -> Result<Vec<ProviderConfigSnapshot>> {
+            let storage = self.storage()?;
+            let length = storage.length().map_err(|err| {
+                StorageError::Backend(format!(
+                    "localStorage provider config length failed: {err:?}"
+                ))
+            })?;
+            let mut snapshots = Vec::new();
+            for index in 0..length {
+                let Some(key) = storage.key(index).map_err(|err| {
+                    StorageError::Backend(format!(
+                        "localStorage provider config key failed: {err:?}"
+                    ))
+                })?
+                else {
+                    continue;
+                };
+                if !key.starts_with(PROVIDER_CONFIG_STORAGE_PREFIX) {
+                    continue;
+                }
+                let Some(json) = storage.get_item(&key).map_err(|err| {
+                    StorageError::Backend(format!(
+                        "localStorage provider config load failed: {err:?}"
+                    ))
+                })?
+                else {
+                    continue;
+                };
+                let snapshot = ProviderConfigSnapshot {
+                    slot: key[PROVIDER_CONFIG_STORAGE_PREFIX.len()..].to_string(),
+                    json,
+                };
+                let _ = snapshot.parse()?;
+                snapshots.push(snapshot);
+            }
+            snapshots.sort_by(|left, right| left.slot.cmp(&right.slot));
+            Ok(snapshots)
+        }
+
+        fn delete_provider_config(&mut self, slot: &str) -> Result<()> {
+            let key = self.provider_config_key(slot)?;
+            self.storage()?.remove_item(&key).map_err(|err| {
+                StorageError::Backend(format!(
+                    "localStorage provider config delete failed: {err:?}"
+                ))
+            })
+        }
+    }
 }
 
 fn normalize_slot(slot: &str) -> Result<String> {
@@ -984,6 +1278,41 @@ mod tests {
         assert_eq!(slots, vec!["a-first", "z-last"]);
     }
 
+    #[test]
+    fn memory_provider_config_round_trips_without_secret_values() {
+        let config = ProviderConfigSet::desktop_env_defaults();
+        let mut storage = MemoryWorkflowStorage::new();
+
+        let snapshot = storage
+            .save_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT, &config)
+            .expect("save provider config");
+
+        assert_eq!(snapshot.slot, DEFAULT_PROVIDER_CONFIG_SLOT);
+        assert!(snapshot.json.contains("GEMINI_API_KEY"));
+        assert!(!snapshot.json.contains("sk-live-secret"));
+        assert_eq!(
+            storage
+                .load_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT)
+                .expect("load provider config"),
+            config
+        );
+    }
+
+    #[test]
+    fn provider_config_snapshot_rejects_unsupported_version() {
+        let snapshot = ProviderConfigSnapshot {
+            slot: DEFAULT_PROVIDER_CONFIG_SLOT.to_string(),
+            json: serde_json::json!({
+                "version": 99,
+                "providerConfig": ProviderConfigSet::mock_all()
+            })
+            .to_string(),
+        };
+
+        let err = snapshot.parse().expect_err("version rejected");
+        assert!(matches!(err, StorageError::Backend(message) if message.contains("not supported")));
+    }
+
     #[cfg(feature = "desktop")]
     #[test]
     fn desktop_storage_round_trips_at_explicit_directory() {
@@ -1002,6 +1331,43 @@ mod tests {
         let loaded = storage.load_workflow("test").unwrap();
         assert_eq!(loaded.name, workflow.name);
         assert!(storage.autosave_path().unwrap().ends_with("autosave.json"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_provider_config_storage_round_trips_at_explicit_directory() {
+        let config = ProviderConfigSet::desktop_env_defaults();
+        let root = unique_temp_dir("gemed-provider-config-test");
+        let mut storage = desktop::DesktopWorkflowStorage::at_dir(&root);
+
+        let snapshot = storage
+            .save_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT, &config)
+            .expect("save provider config");
+
+        assert_eq!(snapshot.slot, DEFAULT_PROVIDER_CONFIG_SLOT);
+        assert_eq!(
+            storage.default_provider_config_path().unwrap(),
+            root.join(PROVIDER_CONFIG_DIR)
+                .join(format!("{DEFAULT_PROVIDER_CONFIG_SLOT}.json"))
+        );
+        assert!(storage.default_provider_config_path().unwrap().is_file());
+        assert_eq!(
+            storage
+                .load_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT)
+                .expect("load provider config"),
+            config
+        );
+        assert_eq!(
+            storage
+                .list_provider_configs()
+                .expect("list provider configs")
+                .into_iter()
+                .map(|snapshot| snapshot.slot)
+                .collect::<Vec<_>>(),
+            vec![DEFAULT_PROVIDER_CONFIG_SLOT]
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

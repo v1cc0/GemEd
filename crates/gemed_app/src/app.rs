@@ -14,8 +14,14 @@ use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
 };
-use gemed_providers::{ProviderConfigSet, ProviderRegistry};
-use gemed_storage::{DEFAULT_AUTOSAVE_SLOT, WorkflowSnapshot, WorkflowStorage};
+use gemed_providers::{
+    ProviderCapability, ProviderConfig, ProviderConfigSet, ProviderId, ProviderRegistry,
+    ProviderRuntimeMode,
+};
+use gemed_storage::{
+    DEFAULT_AUTOSAVE_SLOT, DEFAULT_PROVIDER_CONFIG_SLOT, ProviderConfigSnapshot,
+    ProviderConfigStorage, WorkflowSnapshot, WorkflowStorage,
+};
 
 const CANVAS_WIDTH: f64 = 1400.0;
 const CANVAS_HEIGHT: f64 = 900.0;
@@ -135,6 +141,16 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .edge-row code { color: #dbeafe; font-size: .72rem; overflow-wrap: anywhere; }
 .mini-action { border: 1px solid rgba(248, 113, 113, .28); color: #fecaca; background: rgba(127, 29, 29, .28); border-radius: .55rem; padding: .24rem .45rem; cursor: pointer; font-size: .72rem; }
 .mini-action.neutral { border-color: rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); }
+.mini-action.warn { border-color: rgba(250, 204, 21, .34); color: #fde68a; background: rgba(113, 63, 18, .28); }
+.provider-list { display: flex; flex-direction: column; gap: .55rem; max-height: 18rem; overflow: auto; }
+.provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; align-items: start; border: 1px solid rgba(148, 163, 184, .14); background: rgba(30, 41, 59, .66); border-radius: .8rem; padding: .58rem .65rem; }
+.provider-name { display: flex; align-items: center; gap: .4rem; color: #dbeafe; font-weight: 700; font-size: .82rem; }
+.provider-meta { margin-top: .24rem; color: #98a9c7; font-size: .72rem; line-height: 1.35; overflow-wrap: anywhere; }
+.provider-status { border-radius: 999px; padding: .12rem .42rem; border: 1px solid rgba(148, 163, 184, .2); color: #b6c5e2; background: rgba(15, 23, 42, .78); font-size: .64rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.provider-status.available { color: #bbf7d0; border-color: rgba(74, 222, 128, .26); background: rgba(22, 101, 52, .26); }
+.provider-status.missing { color: #fde68a; border-color: rgba(250, 204, 21, .28); background: rgba(113, 63, 18, .28); }
+.provider-status.disabled { color: #cbd5e1; border-color: rgba(148, 163, 184, .2); background: rgba(51, 65, 85, .36); }
+.provider-actions { display: flex; gap: .28rem; flex-wrap: wrap; justify-content: flex-end; }
 .empty { height: 100%; display: grid; place-items: center; color: #93a4c8; text-align: center; padding: 2rem; }
 @media (max-width: 900px) { .main { grid-template-columns: 1fr; } .sidebar { border-right: none; border-bottom: 1px solid rgba(148,163,184,.16); } .header { align-items: flex-start; height: auto; flex-direction: column; gap: .9rem; padding: 1rem; } .actions { flex-wrap: wrap; } }
 "#;
@@ -158,13 +174,14 @@ pub fn App() -> Element {
     let group_selection_state = use_signal(|| None::<GroupSelectionState>);
     let viewport = use_signal(CanvasViewport::default);
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
+    let provider_config = use_signal(initial_provider_config);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
             main { class: "main",
-                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft }
+                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config }
                 WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft }
             }
         }
@@ -516,6 +533,7 @@ fn Sidebar(
     mut undo_stack: Signal<WorkflowUndoStack>,
     mut viewport: Signal<CanvasViewport>,
     mut connection_draft: Signal<Option<ConnectionDraft>>,
+    mut provider_config: Signal<ProviderConfigSet>,
 ) -> Element {
     let wf = workflow.read();
     let counts = wf.node_type_counts();
@@ -572,6 +590,10 @@ fn Sidebar(
     };
     let mock_provider_summary = ProviderConfigSet::mock_all()
         .summary_with(|_| None::<String>)
+        .sentence();
+    let provider_config_snapshot = provider_config.read().clone();
+    let provider_settings_summary = provider_config_snapshot
+        .summary_with(provider_secret_env_value)
         .sentence();
     let report = execution_report.read();
 
@@ -950,6 +972,125 @@ fn Sidebar(
                 } else {
                     p { "Run Local executes pure Rust prompt/array/output/control nodes and explicitly skips unregistered providers. Run Mocks wires mock provider traits for generation/LLM smoke tests without secrets." }
                     p { "{mock_provider_summary}" }
+                }
+            }
+            section { class: "panel",
+                h2 { "Provider Settings" }
+                p { "{provider_settings_summary}" }
+                p { "Only provider mode and secret source labels are saved. Raw API keys stay outside GemEd config state." }
+                div { class: "handle-actions",
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            provider_config.set(default_provider_config());
+                            message.set(Message::ok("Reset provider settings to platform defaults."));
+                        },
+                        "Platform Defaults"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            provider_config.set(ProviderConfigSet::mock_all());
+                            message.set(Message::ok("Reset provider settings to mock providers."));
+                        },
+                        "Mock Defaults"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| {
+                            let current = provider_config.read().clone();
+                            match save_provider_settings(&current) {
+                                Ok(snapshot) => message.set(Message::ok(format!(
+                                    "Saved provider settings to {} slot `{}`.",
+                                    storage_backend_label(),
+                                    snapshot.slot
+                                ))),
+                                Err(err) => message.set(Message::err(format!("Save provider settings failed: {err}"))),
+                            }
+                        },
+                        "Save Providers"
+                    }
+                    button {
+                        class: "action",
+                        onclick: move |_| match load_provider_settings() {
+                            Ok(config) => {
+                                provider_config.set(config);
+                                message.set(Message::ok(format!(
+                                    "Loaded provider settings from {} slot `{DEFAULT_PROVIDER_CONFIG_SLOT}`.",
+                                    storage_backend_label()
+                                )));
+                            }
+                            Err(err) => message.set(Message::err(format!("Load provider settings failed: {err}"))),
+                        },
+                        "Load Providers"
+                    }
+                }
+                div { class: "provider-list",
+                    for provider in provider_config_snapshot.providers.iter() {
+                        {
+                            let provider_id = provider.id.clone();
+                            let mock_id = provider.id.clone();
+                            let env_id = provider.id.clone();
+                            let disabled_id = provider.id.clone();
+                            let name = provider.id.display_name();
+                            let mode = provider_runtime_mode_label(provider.runtime_mode);
+                            let source = provider.secret_source.public_label();
+                            let capabilities = provider_capability_list(&provider.capabilities);
+                            let status = provider_status(provider);
+                            let status_class = provider_status_class(provider);
+                            rsx! {
+                                div { class: "provider-row",
+                                    div {
+                                        div { class: "provider-name",
+                                            span { "{name}" }
+                                            span { class: "provider-status {status_class}", "{status}" }
+                                        }
+                                        div { class: "provider-meta",
+                                            "{provider_id.as_wire()} · {mode} · {source} · {capabilities}"
+                                        }
+                                    }
+                                    div { class: "provider-actions",
+                                        button {
+                                            class: "mini-action neutral",
+                                            onclick: move |_| {
+                                                set_provider_config_mode(
+                                                    &mut provider_config,
+                                                    mock_id.clone(),
+                                                    ProviderSettingsMode::Mock,
+                                                    &mut message,
+                                                );
+                                            },
+                                            "Mock"
+                                        }
+                                        button {
+                                            class: "mini-action warn",
+                                            onclick: move |_| {
+                                                set_provider_config_mode(
+                                                    &mut provider_config,
+                                                    env_id.clone(),
+                                                    ProviderSettingsMode::DesktopEnv,
+                                                    &mut message,
+                                                );
+                                            },
+                                            "Env"
+                                        }
+                                        button {
+                                            class: "mini-action",
+                                            onclick: move |_| {
+                                                set_provider_config_mode(
+                                                    &mut provider_config,
+                                                    disabled_id.clone(),
+                                                    ProviderSettingsMode::Disabled,
+                                                    &mut message,
+                                                );
+                                            },
+                                            "Off"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             section { class: "panel",
@@ -2324,6 +2465,147 @@ fn save_autosave_workflow(
 
 fn load_autosave_workflow() -> Result<WorkflowFile, gemed_storage::StorageError> {
     platform_storage()?.load_workflow(DEFAULT_AUTOSAVE_SLOT)
+}
+
+fn initial_provider_config() -> ProviderConfigSet {
+    load_provider_settings().unwrap_or_else(|_| default_provider_config())
+}
+
+fn save_provider_settings(
+    config: &ProviderConfigSet,
+) -> Result<ProviderConfigSnapshot, gemed_storage::StorageError> {
+    let mut storage = platform_storage()?;
+    storage.save_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT, config)
+}
+
+fn load_provider_settings() -> Result<ProviderConfigSet, gemed_storage::StorageError> {
+    platform_storage()?.load_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT)
+}
+
+#[cfg(feature = "desktop")]
+fn default_provider_config() -> ProviderConfigSet {
+    ProviderConfigSet::desktop_env_defaults()
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn default_provider_config() -> ProviderConfigSet {
+    ProviderConfigSet::web_backend_defaults()
+}
+
+#[cfg(feature = "desktop")]
+fn provider_secret_env_value(variable: &str) -> Option<String> {
+    std::env::var(variable).ok()
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn provider_secret_env_value(_variable: &str) -> Option<String> {
+    None
+}
+
+#[derive(Clone, Copy)]
+enum ProviderSettingsMode {
+    Mock,
+    DesktopEnv,
+    Disabled,
+}
+
+fn set_provider_config_mode(
+    provider_config: &mut Signal<ProviderConfigSet>,
+    id: ProviderId,
+    mode: ProviderSettingsMode,
+    message: &mut Signal<Message>,
+) {
+    let mut next = provider_config.read().clone();
+    let replacement = match mode {
+        ProviderSettingsMode::Mock => ProviderConfig::mock(id.clone()),
+        ProviderSettingsMode::DesktopEnv => platform_env_provider_config(id.clone()),
+        ProviderSettingsMode::Disabled => ProviderConfig::disabled(id.clone()),
+    };
+    let display_name = replacement.id.display_name();
+    let mode_label = provider_runtime_mode_label(replacement.runtime_mode);
+
+    if let Some(config) = next.providers.iter_mut().find(|config| config.id == id) {
+        *config = replacement;
+    } else {
+        next.providers.push(replacement);
+    }
+    provider_config.set(next);
+    message.set(Message::ok(format!(
+        "Set `{display_name}` provider mode to {mode_label}."
+    )));
+}
+
+#[cfg(feature = "desktop")]
+fn platform_env_provider_config(id: ProviderId) -> ProviderConfig {
+    let variable = provider_env_variable(&id).unwrap_or("CUSTOM_PROVIDER_API_KEY");
+    ProviderConfig::direct_desktop_env(id, variable, None)
+}
+
+#[cfg(all(feature = "web", not(feature = "desktop")))]
+fn platform_env_provider_config(id: ProviderId) -> ProviderConfig {
+    let variable = provider_env_variable(&id).unwrap_or("CUSTOM_PROVIDER_API_KEY");
+    ProviderConfig::web_backend(id, variable, None)
+}
+
+fn provider_env_variable(id: &ProviderId) -> Option<&'static str> {
+    match id {
+        ProviderId::Gemini => Some("GEMINI_API_KEY"),
+        ProviderId::Google => Some("GOOGLE_API_KEY"),
+        ProviderId::OpenAi => Some("OPENAI_API_KEY"),
+        ProviderId::Anthropic => Some("ANTHROPIC_API_KEY"),
+        ProviderId::Replicate => Some("REPLICATE_API_TOKEN"),
+        ProviderId::Fal => Some("FAL_KEY"),
+        ProviderId::Kie => Some("KIE_API_KEY"),
+        ProviderId::WaveSpeed => Some("WAVESPEED_API_KEY"),
+        ProviderId::Mock | ProviderId::Custom(_) => None,
+    }
+}
+
+fn provider_runtime_mode_label(mode: ProviderRuntimeMode) -> &'static str {
+    match mode {
+        ProviderRuntimeMode::Mock => "mock",
+        ProviderRuntimeMode::Disabled => "disabled",
+        ProviderRuntimeMode::DirectDesktop => "direct desktop",
+        ProviderRuntimeMode::WebBackend => "web backend",
+    }
+}
+
+fn provider_status(config: &ProviderConfig) -> &'static str {
+    if !config.enabled || config.runtime_mode == ProviderRuntimeMode::Disabled {
+        "disabled"
+    } else if config.missing_required_secret_with(&provider_secret_env_value) {
+        "missing"
+    } else if config.is_available_with(&provider_secret_env_value) {
+        "available"
+    } else {
+        "pending"
+    }
+}
+
+fn provider_status_class(config: &ProviderConfig) -> &'static str {
+    match provider_status(config) {
+        "available" => "available",
+        "missing" => "missing",
+        "disabled" => "disabled",
+        _ => "",
+    }
+}
+
+fn provider_capability_list(capabilities: &[ProviderCapability]) -> String {
+    if capabilities.is_empty() {
+        return "no declared capabilities".to_string();
+    }
+    capabilities
+        .iter()
+        .map(|capability| match capability {
+            ProviderCapability::Llm => "llm",
+            ProviderCapability::Image => "image",
+            ProviderCapability::Video => "video",
+            ProviderCapability::Audio => "audio",
+            ProviderCapability::Model3d => "3d",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(feature = "desktop")]
