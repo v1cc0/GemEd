@@ -124,6 +124,8 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-preview audio { display: block; width: 100%; height: 2.2rem; padding: 0 .35rem .35rem; }
 .media-preview-placeholder { min-height: 3.2rem; display: grid; place-items: center; padding: .7rem; color: #9fb0cf; text-align: center; font-size: .72rem; overflow-wrap: anywhere; background: repeating-linear-gradient(135deg, rgba(148, 163, 184, .06) 0, rgba(148, 163, 184, .06) 8px, transparent 8px, transparent 16px); }
 .media-preview-error { margin: .42rem .48rem 0; border-radius: .55rem; padding: .42rem .5rem; color: #fecaca; background: rgba(127, 29, 29, .32); border: 1px solid rgba(248, 113, 113, .22); font-size: .68rem; line-height: 1.3; }
+.media-copy-status { margin: .36rem .48rem 0; color: #bbf7d0; font-size: .66rem; line-height: 1.25; overflow-wrap: anywhere; }
+.media-copy-status.err { color: #fecaca; }
 .media-preview-hint { margin: 0; padding: .34rem .48rem .46rem; color: #8ea1c2; font-size: .68rem; overflow-wrap: anywhere; }
 .media-preview-actions { display: flex; gap: .35rem; padding: .42rem .48rem 0; }
 .media-preview-link { border: 1px solid rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); border-radius: .48rem; padding: .18rem .38rem; font-size: .68rem; text-decoration: none; cursor: pointer; }
@@ -142,6 +144,8 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-overlay-placeholder { min-height: 10rem; display: grid; place-items: center; padding: 1rem; color: #9fb0cf; text-align: center; }
 .media-overlay-error { width: min(42rem, 100%); border-radius: .75rem; padding: .72rem .85rem; color: #fecaca; background: rgba(127, 29, 29, .34); border: 1px solid rgba(248, 113, 113, .24); font-size: .82rem; line-height: 1.35; text-align: center; }
 .media-overlay-meta { padding: .65rem 1rem .9rem; color: #9fb0cf; font-size: .75rem; overflow-wrap: anywhere; }
+.media-overlay-copy-status { padding: 0 1rem .75rem; color: #bbf7d0; font-size: .75rem; overflow-wrap: anywhere; }
+.media-overlay-copy-status.err { color: #fecaca; }
 .media-overlay-actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
 .handle-column { position: absolute; top: 3.25rem; bottom: .75rem; display: flex; flex-direction: column; justify-content: center; gap: .28rem; z-index: 4; pointer-events: auto; }
@@ -1767,6 +1771,7 @@ fn MediaPreviewCard(
     mut media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
     let mut load_error = use_signal(|| false);
+    let mut copy_status = use_signal(|| None::<CopyStatus>);
     let label = preview.label.clone();
     let kind_label = preview.kind.label();
     let kind_class = media_preview_kind_class(preview.kind);
@@ -1778,6 +1783,8 @@ fn MediaPreviewCard(
     let download_filename = preview.download_filename();
     let overlay = media_overlay_from_preview(&preview);
     let error_message = media_error_message(preview.kind);
+    let copy_uri = uri.clone();
+    let copy_status_snapshot = copy_status.read().clone();
 
     rsx! {
         div {
@@ -1846,18 +1853,18 @@ fn MediaPreviewCard(
                     "{error_message}"
                 }
             }
-            if renderable {
-                div { class: "media-preview-actions",
-                    if let Some(overlay) = overlay.clone() {
-                        button {
-                            class: "media-preview-link",
-                            onclick: move |event: MouseEvent| {
-                                event.stop_propagation();
-                                media_overlay.set(Some(overlay.clone()));
-                            },
-                            "Preview"
-                        }
+            div { class: "media-preview-actions",
+                if let Some(overlay) = overlay.clone() {
+                    button {
+                        class: "media-preview-link",
+                        onclick: move |event: MouseEvent| {
+                            event.stop_propagation();
+                            media_overlay.set(Some(overlay.clone()));
+                        },
+                        "Preview"
                     }
+                }
+                if renderable {
                     a {
                         class: "media-preview-link",
                         href: "{uri}",
@@ -1878,6 +1885,25 @@ fn MediaPreviewCard(
                         "Download"
                     }
                 }
+                button {
+                    class: "media-preview-link",
+                    onclick: move |event: MouseEvent| {
+                        event.stop_propagation();
+                        copy_status.set(Some(CopyStatus::copying()));
+                        let uri = copy_uri.clone();
+                        async move {
+                            let status = copy_media_uri(uri).await;
+                            copy_status.set(Some(status));
+                        }
+                    },
+                    "Copy URI"
+                }
+            }
+            if let Some(status) = copy_status_snapshot.as_ref() {
+                div {
+                    class: "{status.class_name(\"media-copy-status\")}",
+                    "{status.message}"
+                }
             }
             p { class: "media-preview-hint",
                 "{source_field} · {uri_hint}"
@@ -1890,6 +1916,7 @@ fn MediaPreviewCard(
 fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element {
     let snapshot = media_overlay.read().clone();
     let mut load_error = use_signal(|| false);
+    let mut copy_status = use_signal(|| None::<CopyStatus>);
     let overlay_error_message = snapshot
         .as_ref()
         .map(|overlay| {
@@ -1899,6 +1926,11 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
             )
         })
         .unwrap_or_default();
+    let overlay_copy_uri = snapshot
+        .as_ref()
+        .map(|overlay| overlay.uri.clone())
+        .unwrap_or_default();
+    let overlay_copy_status_snapshot = copy_status.read().clone();
 
     rsx! {
         if let Some(overlay) = snapshot {
@@ -1906,6 +1938,7 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                 class: "media-overlay-backdrop",
                 onclick: move |_| {
                     load_error.set(false);
+                    copy_status.set(None);
                     media_overlay.set(None);
                 },
                 div {
@@ -1942,7 +1975,21 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                                 class: "media-preview-link",
                                 onclick: move |event: MouseEvent| {
                                     event.stop_propagation();
+                                    copy_status.set(Some(CopyStatus::copying()));
+                                    let uri = overlay_copy_uri.clone();
+                                    async move {
+                                        let status = copy_media_uri(uri).await;
+                                        copy_status.set(Some(status));
+                                    }
+                                },
+                                "Copy URI"
+                            }
+                            button {
+                                class: "media-preview-link",
+                                onclick: move |event: MouseEvent| {
+                                    event.stop_propagation();
                                     load_error.set(false);
+                                    copy_status.set(None);
                                     media_overlay.set(None);
                                 },
                                 "Close"
@@ -2005,6 +2052,12 @@ fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element
                     div { class: "media-overlay-meta",
                         "{overlay.source_field} · {overlay.uri_hint}"
                     }
+                    if let Some(status) = overlay_copy_status_snapshot.as_ref() {
+                        div {
+                            class: "{status.class_name(\"media-overlay-copy-status\")}",
+                            "{status.message}"
+                        }
+                    }
                 }
             }
         }
@@ -2053,6 +2106,50 @@ fn media_error_message(kind: MediaKind) -> &'static str {
         MediaKind::Model3d => {
             "3D preview requires a GLB/WebGL adapter before it can be loaded inline."
         }
+    }
+}
+
+fn copy_media_uri_script(uri: &str) -> String {
+    let uri = serde_json::to_string(uri).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+const text = {uri};
+try {{
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+        await navigator.clipboard.writeText(text);
+        return {{ ok: true }};
+    }}
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied
+        ? {{ ok: true }}
+        : {{ ok: false, error: "document.execCommand('copy') returned false" }};
+}} catch (error) {{
+    return {{ ok: false, error: String(error && (error.message || error)) }};
+}}
+"#
+    )
+}
+
+async fn copy_media_uri(uri: String) -> CopyStatus {
+    if uri.trim().is_empty() {
+        return CopyStatus::failed("Copy failed: media URI is empty.");
+    }
+
+    let script = copy_media_uri_script(&uri);
+    match document::eval(&script).await {
+        Ok(value) => CopyStatus::from_eval_value(&value),
+        Err(err) => CopyStatus::failed(format!("Copy unavailable: {err}")),
     }
 }
 
@@ -3501,11 +3598,67 @@ struct MediaOverlay {
     download_filename: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CopyStatus {
+    ok: bool,
+    message: String,
+}
+
+impl CopyStatus {
+    fn copying() -> Self {
+        Self {
+            ok: true,
+            message: "Copying media URI…".to_string(),
+        }
+    }
+
+    fn copied() -> Self {
+        Self {
+            ok: true,
+            message: "Media URI copied to clipboard.".to_string(),
+        }
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+        }
+    }
+
+    fn from_eval_value(value: &serde_json::Value) -> Self {
+        if value
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            Self::copied()
+        } else {
+            let detail = value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .filter(|detail| !detail.trim().is_empty())
+                .unwrap_or("clipboard API rejected the request");
+            Self::failed(format!("Copy failed: {detail}."))
+        }
+    }
+
+    fn class_name(&self, base: &'static str) -> &'static str {
+        if self.ok {
+            base
+        } else if base == "media-overlay-copy-status" {
+            "media-overlay-copy-status err"
+        } else {
+            "media-copy-status err"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, ensure_json_extension, media_error_message, media_overlay_from_preview,
-        media_preview_kind_class, node_ids_intersecting_rect,
+        CanvasRect, CopyStatus, copy_media_uri_script, ensure_json_extension, media_error_message,
+        media_overlay_from_preview, media_preview_kind_class, node_ids_intersecting_rect,
         platform_provider_secret_setup_message, provider_capability_list,
         provider_secret_setup_hint, workflow_json_filename,
     };
@@ -3623,6 +3776,30 @@ mod tests {
         assert!(media_error_message(MediaKind::Audio).starts_with("Audio preview failed"));
         assert!(media_error_message(MediaKind::Video).starts_with("Video preview failed"));
         assert!(media_error_message(MediaKind::Model3d).contains("GLB/WebGL adapter"));
+    }
+
+    #[test]
+    fn copy_media_uri_script_escapes_uri_and_uses_clipboard_fallback() {
+        let script = copy_media_uri_script("gemed-media://media/quote\"line\n.png");
+
+        assert!(script.contains("navigator.clipboard.writeText"));
+        assert!(script.contains("document.execCommand(\"copy\")"));
+        assert!(script.contains(r#"const text = "gemed-media://media/quote\"line\n.png";"#));
+    }
+
+    #[test]
+    fn copy_status_maps_eval_results_to_user_messages_and_css() {
+        let copied = CopyStatus::from_eval_value(&serde_json::json!({ "ok": true }));
+        let rejected =
+            CopyStatus::from_eval_value(&serde_json::json!({ "ok": false, "error": "denied" }));
+
+        assert_eq!(copied, CopyStatus::copied());
+        assert_eq!(copied.class_name("media-copy-status"), "media-copy-status");
+        assert_eq!(rejected.message, "Copy failed: denied.");
+        assert_eq!(
+            rejected.class_name("media-overlay-copy-status"),
+            "media-overlay-copy-status err"
+        );
     }
 
     #[test]

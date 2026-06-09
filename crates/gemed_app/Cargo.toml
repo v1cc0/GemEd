@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dioxus = { workspace = true, features = ["launch", "macro", "html", "signals", "hooks", "logger"] }
+dioxus = { workspace = true, features = ["launch", "macro", "html", "signals", "hooks", "logger", "document"] }
 gemed_core = { path = "../gemed_core" }
 gemed_executor = { path = "../gemed_executor" }
 gemed_media = { path = "../gemed_media" }
@@ -16,7 +16,7 @@ gemed_storage = { path = "../gemed_storage", default-features = false }
 rfd = { workspace = true, optional = true }
 serde_json.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true, features = ["HtmlTextAreaElement"] }
+web-sys = { workspace = true, optional = true, features = ["HtmlTextAreaElement", "Location"] }
 
 [features]
 default = ["desktop"]
