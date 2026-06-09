@@ -14,7 +14,7 @@ use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
 };
-use gemed_providers::ProviderRegistry;
+use gemed_providers::{ProviderConfigSet, ProviderRegistry};
 use gemed_storage::{DEFAULT_AUTOSAVE_SLOT, WorkflowSnapshot, WorkflowStorage};
 
 const CANVAS_WIDTH: f64 = 1400.0;
@@ -278,6 +278,8 @@ fn Header(
                     class: "action",
                     onclick: move |_| {
                         let current = workflow.read().clone();
+                        let provider_config = ProviderConfigSet::mock_all();
+                        let provider_summary = provider_config.summary_with(|_| None::<String>).sentence();
                         let providers = ProviderRegistry::mock_all();
                         match execute_workflow_with_providers(&current, &providers) {
                             Ok(result) => {
@@ -291,7 +293,7 @@ fn Header(
                                 undo_stack.write().clear();
                                 drag_state.set(None);
                                 connection_draft.set(None);
-                                message.set(Message::ok(format!("Mock provider run finished: {summary}.")));
+                                message.set(Message::ok(format!("Mock provider run finished: {summary}. {provider_summary}")));
                             }
                             Err(err) => {
                                 execution_report.set(None);
@@ -568,6 +570,9 @@ fn Sidebar(
         Ok(items) => format!("Order: {}", items.join(" → ")),
         Err(err) => format!("Order blocked: {err}"),
     };
+    let mock_provider_summary = ProviderConfigSet::mock_all()
+        .summary_with(|_| None::<String>)
+        .sentence();
     let report = execution_report.read();
 
     rsx! {
@@ -944,6 +949,7 @@ fn Sidebar(
                     }
                 } else {
                     p { "Run Local executes pure Rust prompt/array/output/control nodes and explicitly skips unregistered providers. Run Mocks wires mock provider traits for generation/LLM smoke tests without secrets." }
+                    p { "{mock_provider_summary}" }
                 }
             }
             section { class: "panel",

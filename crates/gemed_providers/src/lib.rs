@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,6 +93,293 @@ pub enum ProviderCapability {
     Model3d,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ProviderSecretSource {
+    None,
+    Environment { variable: String },
+    DesktopKeychain { service: String, account: String },
+    WebBackend { binding: String },
+}
+
+impl fmt::Debug for ProviderSecretSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::Environment { variable } => formatter
+                .debug_struct("Environment")
+                .field("variable", variable)
+                .finish(),
+            Self::DesktopKeychain { service, account } => formatter
+                .debug_struct("DesktopKeychain")
+                .field("service", service)
+                .field("account", account)
+                .finish(),
+            Self::WebBackend { binding } => formatter
+                .debug_struct("WebBackend")
+                .field("binding", binding)
+                .finish(),
+        }
+    }
+}
+
+impl ProviderSecretSource {
+    pub fn public_label(&self) -> String {
+        match self {
+            Self::None => "no secret".to_string(),
+            Self::Environment { variable } => format!("env:{variable}"),
+            Self::DesktopKeychain { service, account } => {
+                format!("desktop-keychain:{service}/{account}")
+            }
+            Self::WebBackend { binding } => format!("web-backend:{binding}"),
+        }
+    }
+
+    pub fn is_configured_with<F>(&self, resolver: &F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match self {
+            Self::None => false,
+            Self::Environment { variable } => resolver(variable)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            Self::DesktopKeychain { .. } | Self::WebBackend { .. } => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderRuntimeMode {
+    Mock,
+    Disabled,
+    DirectDesktop,
+    WebBackend,
+}
+
+impl ProviderRuntimeMode {
+    pub fn requires_local_secret(self) -> bool {
+        matches!(self, Self::DirectDesktop)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    pub id: ProviderId,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub runtime_mode: ProviderRuntimeMode,
+    pub secret_source: ProviderSecretSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<ProviderCapability>,
+}
+
+impl ProviderConfig {
+    pub fn mock(id: ProviderId) -> Self {
+        Self {
+            id: id.clone(),
+            enabled: true,
+            runtime_mode: ProviderRuntimeMode::Mock,
+            secret_source: ProviderSecretSource::None,
+            base_url: None,
+            default_model: None,
+            capabilities: default_capabilities(&id),
+        }
+    }
+
+    pub fn direct_desktop_env(
+        id: ProviderId,
+        variable: impl Into<String>,
+        default_model: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.clone(),
+            enabled: true,
+            runtime_mode: ProviderRuntimeMode::DirectDesktop,
+            secret_source: ProviderSecretSource::Environment {
+                variable: variable.into(),
+            },
+            base_url: None,
+            default_model,
+            capabilities: default_capabilities(&id),
+        }
+    }
+
+    pub fn disabled(id: ProviderId) -> Self {
+        Self {
+            id: id.clone(),
+            enabled: false,
+            runtime_mode: ProviderRuntimeMode::Disabled,
+            secret_source: ProviderSecretSource::None,
+            base_url: None,
+            default_model: None,
+            capabilities: default_capabilities(&id),
+        }
+    }
+
+    pub fn is_available_with<F>(&self, resolver: &F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if !self.enabled || self.runtime_mode == ProviderRuntimeMode::Disabled {
+            return false;
+        }
+
+        match self.runtime_mode {
+            ProviderRuntimeMode::Mock | ProviderRuntimeMode::WebBackend => true,
+            ProviderRuntimeMode::Disabled => false,
+            ProviderRuntimeMode::DirectDesktop => {
+                self.direct_desktop_secret_available_with(resolver)
+            }
+        }
+    }
+
+    pub fn missing_required_secret_with<F>(&self, resolver: &F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.enabled
+            && self.runtime_mode.requires_local_secret()
+            && !self.direct_desktop_secret_available_with(resolver)
+    }
+
+    fn direct_desktop_secret_available_with<F>(&self, resolver: &F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match &self.secret_source {
+            ProviderSecretSource::Environment { .. }
+            | ProviderSecretSource::DesktopKeychain { .. } => {
+                self.secret_source.is_configured_with(resolver)
+            }
+            ProviderSecretSource::None | ProviderSecretSource::WebBackend { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigSet {
+    #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+}
+
+impl ProviderConfigSet {
+    pub fn new(providers: Vec<ProviderConfig>) -> Self {
+        Self { providers }
+    }
+
+    pub fn mock_all() -> Self {
+        Self::new(mock_provider_ids().map(ProviderConfig::mock).collect())
+    }
+
+    pub fn desktop_env_defaults() -> Self {
+        Self::new(vec![
+            ProviderConfig::direct_desktop_env(ProviderId::Gemini, "GEMINI_API_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::Google, "GOOGLE_API_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::OpenAi, "OPENAI_API_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::Anthropic, "ANTHROPIC_API_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::Replicate, "REPLICATE_API_TOKEN", None),
+            ProviderConfig::direct_desktop_env(ProviderId::Fal, "FAL_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::Kie, "KIE_API_KEY", None),
+            ProviderConfig::direct_desktop_env(ProviderId::WaveSpeed, "WAVESPEED_API_KEY", None),
+        ])
+    }
+
+    pub fn get(&self, id: &ProviderId) -> Option<&ProviderConfig> {
+        self.providers.iter().find(|config| config.id == *id)
+    }
+
+    pub fn available_provider_ids_with<F>(&self, resolver: &F) -> Vec<ProviderId>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.providers
+            .iter()
+            .filter(|config| config.is_available_with(resolver))
+            .map(|config| config.id.clone())
+            .collect()
+    }
+
+    pub fn missing_secret_provider_ids_with<F>(&self, resolver: &F) -> Vec<ProviderId>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.providers
+            .iter()
+            .filter(|config| config.missing_required_secret_with(resolver))
+            .map(|config| config.id.clone())
+            .collect()
+    }
+
+    pub fn summary_with<F>(&self, resolver: F) -> ProviderConfigSummary
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let mut summary = ProviderConfigSummary {
+            total: self.providers.len(),
+            ..ProviderConfigSummary::default()
+        };
+
+        for config in &self.providers {
+            if !config.enabled || config.runtime_mode == ProviderRuntimeMode::Disabled {
+                summary.disabled += 1;
+                continue;
+            }
+
+            summary.enabled += 1;
+            if config.is_available_with(&resolver) {
+                summary.available += 1;
+            }
+            if config.missing_required_secret_with(&resolver) {
+                summary.missing_local_secrets += 1;
+            }
+
+            match config.runtime_mode {
+                ProviderRuntimeMode::Mock => summary.mock += 1,
+                ProviderRuntimeMode::DirectDesktop => summary.direct_desktop += 1,
+                ProviderRuntimeMode::WebBackend => summary.web_backend += 1,
+                ProviderRuntimeMode::Disabled => summary.disabled += 1,
+            }
+        }
+
+        summary
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProviderConfigSummary {
+    pub total: usize,
+    pub enabled: usize,
+    pub available: usize,
+    pub mock: usize,
+    pub direct_desktop: usize,
+    pub web_backend: usize,
+    pub disabled: usize,
+    pub missing_local_secrets: usize,
+}
+
+impl ProviderConfigSummary {
+    pub fn sentence(self) -> String {
+        format!(
+            "Providers: {} configured, {} enabled, {} available ({} mock, {} direct desktop, {} web backend), {} missing local secrets.",
+            self.total,
+            self.enabled,
+            self.available,
+            self.mock,
+            self.direct_desktop,
+            self.web_backend,
+            self.missing_local_secrets
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModel {
@@ -102,6 +389,45 @@ pub struct ProviderModel {
     pub capabilities: Vec<ProviderCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn mock_provider_ids() -> impl Iterator<Item = ProviderId> {
+    [
+        ProviderId::Mock,
+        ProviderId::Gemini,
+        ProviderId::Google,
+        ProviderId::OpenAi,
+        ProviderId::Anthropic,
+        ProviderId::Replicate,
+        ProviderId::Fal,
+        ProviderId::Kie,
+        ProviderId::WaveSpeed,
+    ]
+    .into_iter()
+}
+
+fn default_capabilities(id: &ProviderId) -> Vec<ProviderCapability> {
+    match id {
+        ProviderId::Gemini | ProviderId::Google | ProviderId::Mock => vec![
+            ProviderCapability::Llm,
+            ProviderCapability::Image,
+            ProviderCapability::Video,
+            ProviderCapability::Audio,
+            ProviderCapability::Model3d,
+        ],
+        ProviderId::OpenAi | ProviderId::Anthropic => vec![ProviderCapability::Llm],
+        ProviderId::Replicate | ProviderId::Fal | ProviderId::Kie | ProviderId::WaveSpeed => vec![
+            ProviderCapability::Image,
+            ProviderCapability::Video,
+            ProviderCapability::Audio,
+            ProviderCapability::Model3d,
+        ],
+        ProviderId::Custom(_) => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,17 +602,7 @@ impl ProviderRegistry {
 
     pub fn mock_all() -> Self {
         let mut registry = Self::new();
-        for id in [
-            ProviderId::Mock,
-            ProviderId::Gemini,
-            ProviderId::Google,
-            ProviderId::OpenAi,
-            ProviderId::Anthropic,
-            ProviderId::Replicate,
-            ProviderId::Fal,
-            ProviderId::Kie,
-            ProviderId::WaveSpeed,
-        ] {
+        for id in mock_provider_ids() {
             registry.register(MockProvider::new(id));
         }
         registry
@@ -539,5 +855,109 @@ mod tests {
         .expect_err("empty prompt rejected");
 
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn mock_config_needs_no_secret() {
+        let configs = ProviderConfigSet::mock_all();
+        let summary = configs.summary_with(|_| None::<String>);
+
+        assert_eq!(summary.total, 9);
+        assert_eq!(summary.enabled, 9);
+        assert_eq!(summary.available, 9);
+        assert_eq!(summary.mock, 9);
+        assert_eq!(summary.missing_local_secrets, 0);
+        assert!(
+            configs
+                .missing_secret_provider_ids_with(&|_| None::<String>)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn desktop_env_defaults_use_expected_secret_names() {
+        let configs = ProviderConfigSet::desktop_env_defaults();
+
+        let expected = [
+            (ProviderId::Gemini, "GEMINI_API_KEY"),
+            (ProviderId::Google, "GOOGLE_API_KEY"),
+            (ProviderId::OpenAi, "OPENAI_API_KEY"),
+            (ProviderId::Anthropic, "ANTHROPIC_API_KEY"),
+            (ProviderId::Replicate, "REPLICATE_API_TOKEN"),
+            (ProviderId::Fal, "FAL_KEY"),
+            (ProviderId::Kie, "KIE_API_KEY"),
+            (ProviderId::WaveSpeed, "WAVESPEED_API_KEY"),
+        ];
+
+        for (id, variable) in expected {
+            let config = configs.get(&id).expect("provider config exists");
+            assert_eq!(config.runtime_mode, ProviderRuntimeMode::DirectDesktop);
+            assert_eq!(
+                config.secret_source,
+                ProviderSecretSource::Environment {
+                    variable: variable.to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn direct_desktop_reports_missing_and_available_secrets() {
+        let configs = ProviderConfigSet::desktop_env_defaults();
+
+        let missing = configs.missing_secret_provider_ids_with(&|_| None::<String>);
+        assert_eq!(missing.len(), 8);
+
+        let available = configs.available_provider_ids_with(&|name| match name {
+            "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" => Some("present".to_string()),
+            _ => None,
+        });
+        assert_eq!(available, vec![ProviderId::OpenAi, ProviderId::Anthropic]);
+
+        let summary = configs.summary_with(|name| match name {
+            "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" => Some("present".to_string()),
+            _ => None,
+        });
+        assert_eq!(summary.available, 2);
+        assert_eq!(summary.missing_local_secrets, 6);
+    }
+
+    #[test]
+    fn disabled_and_web_backend_do_not_require_local_secret() {
+        let configs = ProviderConfigSet::new(vec![
+            ProviderConfig::disabled(ProviderId::OpenAi),
+            ProviderConfig {
+                id: ProviderId::Custom("private-proxy".to_string()),
+                enabled: true,
+                runtime_mode: ProviderRuntimeMode::WebBackend,
+                secret_source: ProviderSecretSource::WebBackend {
+                    binding: "PROVIDER_API_KEY".to_string(),
+                },
+                base_url: Some("https://provider-backend.local".to_string()),
+                default_model: None,
+                capabilities: vec![ProviderCapability::Image],
+            },
+        ]);
+
+        let summary = configs.summary_with(|_| None::<String>);
+        assert_eq!(summary.disabled, 1);
+        assert_eq!(summary.web_backend, 1);
+        assert_eq!(summary.available, 1);
+        assert_eq!(summary.missing_local_secrets, 0);
+    }
+
+    #[test]
+    fn config_debug_and_summary_do_not_expose_secret_values() {
+        let secret = ProviderSecretSource::Environment {
+            variable: "OPENAI_API_KEY".to_string(),
+        };
+        assert!(!format!("{secret:?}").contains("sk-live-secret"));
+
+        let configs = ProviderConfigSet::desktop_env_defaults();
+        let summary = configs
+            .summary_with(|name| (name == "OPENAI_API_KEY").then(|| "sk-live-secret".to_string()));
+        let sentence = summary.sentence();
+        assert!(!sentence.contains("sk-live-secret"));
+        assert!(sentence.contains("missing local secrets"));
     }
 }
