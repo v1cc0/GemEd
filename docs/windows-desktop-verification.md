@@ -4,7 +4,8 @@ This document is the evidence checklist for the Windows desktop target. Do not m
 
 ## CI evidence
 
-The GitHub Actions Dioxus matrix includes both Windows build and bundle jobs on `windows-latest`:
+The GitHub Actions Dioxus matrix includes both Windows build and bundle jobs on `windows-latest`.
+It runs on `push` to `main`, pull requests, and manual `workflow_dispatch` runs so Windows evidence can be collected without changing source code:
 
 ```bash
 dx build --desktop --features desktop
