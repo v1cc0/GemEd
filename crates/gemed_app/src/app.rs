@@ -4,11 +4,12 @@ use dioxus::html::{
 };
 use dioxus::prelude::*;
 use gemed_core::{
-    GroupColor, NodeGroup, NodeStatus, Position, Size, WorkflowEdge, WorkflowFile, WorkflowNode,
-    WorkflowUndoStack, add_edge_between, create_group_for_nodes, is_node_in_locked_group,
-    move_group_by, move_node_by, remove_edge, resize_group_by, select_node, selected_node_id,
-    selected_node_ids, set_group_size, set_node_position, source_handle_options,
-    target_handle_options, toggle_group_lock, toggle_node_selection,
+    GroupColor, NodeGroup, NodeStatus, NodeType, Position, Size, WorkflowEdge, WorkflowFile,
+    WorkflowNode, WorkflowUndoStack, add_edge_between, create_group_for_nodes,
+    generate_split_grid_children, is_node_in_locked_group, move_group_by, move_node_by,
+    remove_edge, resize_group_by, select_node, selected_node_id, selected_node_ids, set_group_size,
+    set_node_position, source_handle_options, target_handle_options, toggle_group_lock,
+    toggle_node_selection,
 };
 use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
@@ -678,6 +679,19 @@ fn Sidebar(
             .unwrap_or_else(|| "1 node selected.".to_string()),
         count => format!("{count} nodes selected: {}.", selected_ids.join(", ")),
     };
+    let selected_split_grid_id = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .filter(|node| node.node_type == NodeType::SplitGrid)
+        .and_then(|node| {
+            let has_children = node
+                .data
+                .get("childNodeIds")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            (!has_children && !is_node_in_locked_group(&wf, &node.id)).then(|| node.id.clone())
+        });
+    let can_generate_split_grid_children = selected_split_grid_id.is_some();
     let draft_summary = connection_draft
         .read()
         .as_ref()
@@ -925,6 +939,26 @@ fn Sidebar(
                             });
                         },
                         "Create Group"
+                    }
+                    button {
+                        class: "action",
+                        disabled: !can_generate_split_grid_children,
+                        onclick: move |_| {
+                            let Some(split_node_id) = selected_split_grid_id.clone() else {
+                                message.set(Message::err("Select an unconfigured Split Grid node first."));
+                                return;
+                            };
+                            mutate_workflow(&mut workflow, &mut json_text, &mut message, &mut undo_stack, move |workflow| {
+                                let generated = generate_split_grid_children(workflow, &split_node_id)
+                                    .map_err(|err| err.to_string())?;
+                                Ok(format!(
+                                    "Generated {} split-grid child set(s) for `{}`.",
+                                    generated.child_node_ids.len(),
+                                    generated.split_node_id
+                                ))
+                            });
+                        },
+                        "Split Children"
                     }
                     button {
                         class: "action",

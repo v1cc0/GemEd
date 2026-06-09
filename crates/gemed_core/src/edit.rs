@@ -1,5 +1,9 @@
-use crate::{GroupColor, NodeGroup, Position, Size, WorkflowEdge, WorkflowFile};
+use crate::{
+    GroupColor, NodeGroup, NodeType, Position, Size, WorkflowEdge, WorkflowFile, WorkflowNode,
+};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -39,6 +43,8 @@ pub enum WorkflowEditError {
         source_id: String,
         target_id: String,
     },
+    #[error("{0}")]
+    InvalidOperation(String),
     #[error("{0} history is empty")]
     HistoryEmpty(String),
 }
@@ -49,6 +55,20 @@ pub type EditResult<T> = std::result::Result<T, WorkflowEditError>;
 pub struct GroupMove {
     pub position: Position,
     pub moved_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitGridChildSet {
+    pub image_input: String,
+    pub prompt: String,
+    pub nano_banana: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitGridChildGeneration {
+    pub split_node_id: String,
+    pub child_node_ids: Vec<SplitGridChildSet>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +365,181 @@ pub fn move_group_by(
     })
 }
 
+pub fn generate_split_grid_children(
+    workflow: &mut WorkflowFile,
+    split_node_id: &str,
+) -> EditResult<SplitGridChildGeneration> {
+    let split_index = workflow
+        .nodes
+        .iter()
+        .position(|node| node.id == split_node_id)
+        .ok_or_else(|| WorkflowEditError::NodeNotFound(split_node_id.to_string()))?;
+    let split_node = workflow.nodes[split_index].clone();
+    if split_node.node_type != NodeType::SplitGrid {
+        return Err(WorkflowEditError::InvalidOperation(format!(
+            "`{split_node_id}` is not a split-grid node"
+        )));
+    }
+    if is_node_in_locked_group(workflow, split_node_id) {
+        return Err(WorkflowEditError::NodeInLockedGroup(
+            split_node_id.to_string(),
+        ));
+    }
+    if json_array_len(&split_node.data, "childNodeIds") > 0 {
+        return Err(WorkflowEditError::InvalidOperation(format!(
+            "split-grid node `{split_node_id}` already has child nodes"
+        )));
+    }
+
+    let rows = positive_u32_field(&split_node.data, "gridRows").unwrap_or(2);
+    let cols = positive_u32_field(&split_node.data, "gridCols").unwrap_or(2);
+    let target_count = positive_usize_field(&split_node.data, "targetCount")
+        .unwrap_or_else(|| rows.saturating_mul(cols) as usize);
+    if target_count == 0 {
+        return Err(WorkflowEditError::InvalidOperation(
+            "split-grid target count must be greater than zero".to_string(),
+        ));
+    }
+    if target_count > 12 {
+        return Err(WorkflowEditError::InvalidOperation(
+            "split-grid child generation currently supports at most 12 cells".to_string(),
+        ));
+    }
+
+    let default_prompt = string_field(&split_node.data, "defaultPrompt").unwrap_or_default();
+    let generate_settings = split_node
+        .data
+        .get("generateSettings")
+        .cloned()
+        .unwrap_or_else(default_split_grid_generate_settings);
+    let start_x = split_node.position.x + 340.0;
+    let start_y = split_node.position.y;
+    let cluster_width = 600.0;
+    let cluster_height = 390.0;
+    let cluster_gap = 64.0;
+    let image_to_generation_gap = 300.0;
+    let prompt_y_gap = 176.0;
+    let mut child_node_ids = Vec::with_capacity(target_count);
+
+    for index in 0..target_count {
+        let row = index / cols as usize;
+        let col = index % cols as usize;
+        let cluster_x = start_x + col as f64 * (cluster_width + cluster_gap);
+        let cluster_y = start_y + row as f64 * (cluster_height + cluster_gap);
+        let cell_number = index + 1;
+        let image_input = next_node_id(
+            workflow,
+            &format!("{split_node_id}_cell_{cell_number}_image"),
+        );
+        let prompt = next_node_id(
+            workflow,
+            &format!("{split_node_id}_cell_{cell_number}_prompt"),
+        );
+        let nano_banana = next_node_id(
+            workflow,
+            &format!("{split_node_id}_cell_{cell_number}_generate"),
+        );
+
+        workflow.nodes.push(WorkflowNode::new(
+            image_input.clone(),
+            NodeType::ImageInput,
+            Position {
+                x: cluster_x,
+                y: cluster_y,
+            },
+            json!({
+                "label": format!("Cell {cell_number} Image"),
+                "status": "idle",
+                "image": null,
+                "imageRef": null,
+                "filename": null,
+                "dimensions": { "width": 0, "height": 0 }
+            }),
+        ));
+        workflow.nodes.push(WorkflowNode::new(
+            nano_banana.clone(),
+            NodeType::NanoBanana,
+            Position {
+                x: cluster_x + image_to_generation_gap,
+                y: cluster_y,
+            },
+            nano_banana_child_data(cell_number, &generate_settings),
+        ));
+        workflow.nodes.push(WorkflowNode::new(
+            prompt.clone(),
+            NodeType::Prompt,
+            Position {
+                x: cluster_x,
+                y: cluster_y + prompt_y_gap,
+            },
+            json!({
+                "label": format!("Cell {cell_number} Prompt"),
+                "status": "idle",
+                "prompt": default_prompt
+            }),
+        ));
+
+        let split_edge = add_edge_between(
+            workflow,
+            split_node_id,
+            &image_input,
+            Some(format!("image-{index}")),
+            Some("image".to_string()),
+        )?;
+        if let Some(edge) = workflow
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == split_edge.id)
+        {
+            edge.edge_type = Some("reference".to_string());
+        }
+        add_edge_between(
+            workflow,
+            &image_input,
+            &nano_banana,
+            Some("image".to_string()),
+            Some("image".to_string()),
+        )?;
+        add_edge_between(
+            workflow,
+            &prompt,
+            &nano_banana,
+            Some("text".to_string()),
+            Some("prompt".to_string()),
+        )?;
+
+        child_node_ids.push(SplitGridChildSet {
+            image_input,
+            prompt,
+            nano_banana,
+        });
+    }
+
+    let Some(split_node) = workflow
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == split_node_id)
+    else {
+        return Err(WorkflowEditError::NodeNotFound(split_node_id.to_string()));
+    };
+    ensure_object_data(split_node);
+    let Some(data) = split_node.data.as_object_mut() else {
+        unreachable!("ensure_object_data converts node data into an object")
+    };
+    data.insert("targetCount".to_string(), json!(target_count));
+    data.insert("gridRows".to_string(), json!(rows));
+    data.insert("gridCols".to_string(), json!(cols));
+    data.insert("defaultPrompt".to_string(), json!(default_prompt));
+    data.insert("generateSettings".to_string(), generate_settings);
+    data.insert("childNodeIds".to_string(), json!(child_node_ids));
+    data.insert("isConfigured".to_string(), json!(true));
+
+    Ok(SplitGridChildGeneration {
+        split_node_id: split_node_id.to_string(),
+        child_node_ids,
+    })
+}
+
 pub fn add_edge_between(
     workflow: &mut WorkflowFile,
     source: &str,
@@ -436,6 +631,82 @@ fn ensure_node_exists(workflow: &WorkflowFile, node_id: &str) -> EditResult<()> 
         .any(|node| node.id == node_id)
         .then_some(())
         .ok_or_else(|| WorkflowEditError::NodeNotFound(node_id.to_string()))
+}
+
+fn ensure_object_data(node: &mut WorkflowNode) {
+    if !node.data.is_object() {
+        node.data = json!({});
+    }
+}
+
+fn next_node_id(workflow: &WorkflowFile, base: &str) -> String {
+    let base = sanitize_id_part(base).trim_matches('_').to_string();
+    let base = if base.is_empty() {
+        "node".to_string()
+    } else {
+        base
+    };
+    if !workflow.nodes.iter().any(|node| node.id == base) {
+        return base;
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{base}_{suffix}");
+        if !workflow.nodes.iter().any(|node| node.id == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+fn json_array_len(data: &Value, key: &str) -> usize {
+    data.get(key).and_then(Value::as_array).map_or(0, Vec::len)
+}
+
+fn positive_u32_field(data: &Value, key: &str) -> Option<u32> {
+    data.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+fn positive_usize_field(data: &Value, key: &str) -> Option<usize> {
+    data.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+fn string_field(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn default_split_grid_generate_settings() -> Value {
+    json!({
+        "aspectRatio": "1:1",
+        "resolution": "1K",
+        "model": "nano-banana-pro",
+        "useGoogleSearch": false,
+        "useImageSearch": false
+    })
+}
+
+fn nano_banana_child_data(cell_number: usize, generate_settings: &Value) -> Value {
+    let mut data = json!({
+        "label": format!("Cell {cell_number} Generate"),
+        "status": "idle",
+        "provider": "gemini"
+    });
+    if let (Some(target), Some(settings)) = (data.as_object_mut(), generate_settings.as_object()) {
+        for (key, value) in settings {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    data
 }
 
 fn next_edge_id(workflow: &WorkflowFile, source: &str, target: &str) -> String {
@@ -905,5 +1176,66 @@ mod tests {
 
         let err = move_group_by(&mut workflow, "group_1", 10.0, 10.0).unwrap_err();
         assert!(matches!(err, WorkflowEditError::GroupLocked(group_id) if group_id == "group_1"));
+    }
+
+    #[test]
+    fn generating_split_grid_children_creates_legacy_child_sets_and_edges() {
+        let mut workflow = WorkflowFile {
+            name: "split children".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "split",
+                NodeType::SplitGrid,
+                Position { x: 100.0, y: 120.0 },
+                json!({
+                    "targetCount": 2,
+                    "gridRows": 1,
+                    "gridCols": 2,
+                    "defaultPrompt": "Enhance this cell",
+                    "generateSettings": {
+                        "aspectRatio": "2:3",
+                        "resolution": "2K",
+                        "model": "nano-banana-pro",
+                        "useGoogleSearch": false,
+                        "useImageSearch": false
+                    },
+                    "childNodeIds": [],
+                    "isConfigured": false
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+
+        let generated = generate_split_grid_children(&mut workflow, "split").unwrap();
+
+        assert_eq!(generated.child_node_ids.len(), 2);
+        assert_eq!(workflow.nodes.len(), 7);
+        assert_eq!(workflow.edges.len(), 6);
+        let split = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "split")
+            .unwrap();
+        assert_eq!(
+            split.data.get("isConfigured").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            split
+                .data
+                .get("childNodeIds")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(workflow.edges.iter().any(|edge| {
+            edge.source == "split"
+                && edge.source_handle.as_deref() == Some("image-0")
+                && edge.target == generated.child_node_ids[0].image_input
+                && edge.target_handle.as_deref() == Some("image")
+        }));
+        assert!(workflow.nodes.iter().any(|node| {
+            node.id == generated.child_node_ids[0].prompt
+                && node.data.get("prompt").and_then(Value::as_str) == Some("Enhance this cell")
+        }));
     }
 }

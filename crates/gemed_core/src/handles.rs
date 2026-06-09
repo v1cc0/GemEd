@@ -86,8 +86,8 @@ pub fn target_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
         ],
         NodeType::ConditionalSwitch | NodeType::Array => vec![handle("text", "text")],
         NodeType::Annotation => vec![handle("image", "image")],
+        NodeType::ImageInput => vec![handle("image", "image")],
         NodeType::Prompt
-        | NodeType::ImageInput
         | NodeType::AudioInput
         | NodeType::VideoInput
         | NodeType::SplitGrid
@@ -259,6 +259,20 @@ mod tests {
         let handles = source_handle_options(&node);
         let ids: Vec<&str> = handles.iter().map(|handle| handle.id.as_str()).collect();
         assert_eq!(ids, vec!["image", "image-0", "image-1", "image-2"]);
+    }
+
+    #[test]
+    fn image_input_accepts_generated_image_targets() {
+        let node = WorkflowNode::new(
+            "image",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({}),
+        );
+
+        let handles = target_handle_options(&node);
+        let ids: Vec<&str> = handles.iter().map(|handle| handle.id.as_str()).collect();
+        assert_eq!(ids, vec!["image"]);
     }
 
     #[test]

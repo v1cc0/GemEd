@@ -167,7 +167,7 @@ async fn execute_workflow_inner(
         let inputs = connected_inputs(&workflow, &node_id);
         let node_snapshot = workflow.nodes[index].clone();
         let outcome = execute_node(&node_snapshot, &inputs, providers).await;
-        apply_updates(&mut workflow.nodes[index], outcome.updates);
+        apply_workflow_updates(&mut workflow, index, outcome.updates);
         set_status(&mut workflow.nodes[index], outcome.status);
         if let Some(error) = outcome.error.as_deref() {
             set_data_field(&mut workflow.nodes[index], "error", json!(error));
@@ -615,6 +615,9 @@ fn execute_split_grid(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutc
                 "__mediaAdapter".to_string(),
                 json!("rust-inline-image-grid"),
             );
+            for (node_id, image) in split_grid_child_images(node, &result.images) {
+                updates.insert(format!("__childImage::{node_id}"), json!(image));
+            }
             NodeOutcome::complete("Split grid produced inline image cells.", updates)
         }
         Err(err) => NodeOutcome::error(format!("Split grid failed: {err}"), IndexMap::new()),
@@ -645,6 +648,21 @@ fn execute_output_gallery(inputs: &ConnectedInputs) -> NodeOutcome {
     let mut updates = IndexMap::new();
     updates.insert("images".to_string(), json!(inputs.images));
     NodeOutcome::complete("Output gallery collected upstream images.", updates)
+}
+
+fn split_grid_child_images(node: &WorkflowNode, images: &[String]) -> Vec<(String, String)> {
+    node.data
+        .get("childNodeIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, child)| {
+            let image_input = child.get("imageInput").and_then(Value::as_str)?;
+            let image = images.get(index)?;
+            Some((image_input.to_string(), image.clone()))
+        })
+        .collect()
 }
 
 fn image_compare_summary(comparison: &InlineImageCompareResult) -> String {
@@ -745,10 +763,38 @@ fn optional_string_value(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |value| json!(value))
 }
 
-fn apply_updates(node: &mut WorkflowNode, updates: IndexMap<String, Value>) {
+fn apply_workflow_updates(
+    workflow: &mut WorkflowFile,
+    index: usize,
+    updates: IndexMap<String, Value>,
+) {
     for (key, value) in updates {
-        set_data_field(node, &key, value);
+        if let Some(child_node_id) = key.strip_prefix("__childImage::") {
+            apply_split_grid_child_image(workflow, child_node_id, value);
+        } else {
+            set_data_field(&mut workflow.nodes[index], &key, value);
+        }
     }
+}
+
+fn apply_split_grid_child_image(workflow: &mut WorkflowFile, child_node_id: &str, value: Value) {
+    let Some(image) = value
+        .as_str()
+        .filter(|image| !image.is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let Some(child) = workflow
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == child_node_id && node.node_type == NodeType::ImageInput)
+    else {
+        return;
+    };
+    set_data_field(child, "image", json!(image));
+    set_data_field(child, "imageRef", Value::Null);
+    set_data_field(child, "status", json!("complete"));
 }
 
 fn set_status(node: &mut WorkflowNode, status: NodeStatusWire) {
@@ -805,7 +851,9 @@ fn string_array_field(data: &Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gemed_core::{GroupColor, NodeGroup, Position, Size, WorkflowEdge};
+    use gemed_core::{
+        GroupColor, NodeGroup, Position, Size, WorkflowEdge, generate_split_grid_children,
+    };
     use indexmap::IndexMap;
 
     #[test]
@@ -1278,6 +1326,62 @@ mod tests {
         assert_eq!(output.data.get("image"), images.get(1));
         assert_eq!(result.report.error_count(), 0);
         assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn split_grid_populates_generated_child_image_inputs() {
+        let source = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP4z8DwHwyBNBAw/AcAR8oI+ItOQ4UAAAAASUVORK5CYII=";
+        let mut workflow = WorkflowFile {
+            name: "split children".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "input",
+                    NodeType::ImageInput,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"image": source}),
+                ),
+                WorkflowNode::new(
+                    "split",
+                    NodeType::SplitGrid,
+                    Position { x: 200.0, y: 0.0 },
+                    json!({
+                        "gridRows": 2,
+                        "gridCols": 2,
+                        "targetCount": 2,
+                        "defaultPrompt": "Enhance",
+                        "childNodeIds": []
+                    }),
+                ),
+            ],
+            edges: vec![WorkflowEdge::with_handles(
+                "e1", "input", "split", "image", "image",
+            )],
+            ..WorkflowFile::blank()
+        };
+        let generated = generate_split_grid_children(&mut workflow, "split").unwrap();
+
+        let result = execute_simple_workflow(&workflow).expect("executes split child population");
+
+        for child in generated.child_node_ids {
+            let image_input = result
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.id == child.image_input)
+                .expect("child image input exists");
+            assert_eq!(
+                image_input.data.get("status").and_then(Value::as_str),
+                Some("complete")
+            );
+            assert!(
+                image_input
+                    .data
+                    .get("image")
+                    .and_then(Value::as_str)
+                    .is_some_and(|image| image.starts_with("data:image/png;base64,"))
+            );
+        }
+        assert_eq!(result.report.error_count(), 0);
     }
 
     #[test]
