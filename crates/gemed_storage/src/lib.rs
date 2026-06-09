@@ -751,7 +751,10 @@ pub mod desktop {
             }
             Value::Object(map) => {
                 hydrate_known_media_fields(root, map)?;
-                for item in map.values_mut() {
+                for (key, item) in map.iter_mut() {
+                    if is_known_media_ref_field(key) {
+                        continue;
+                    }
                     hydrate_media_value(root, item)?;
                 }
                 Ok(())
@@ -809,6 +812,15 @@ pub mod desktop {
         }
 
         Ok(())
+    }
+
+    fn is_known_media_ref_field(field: &str) -> bool {
+        SINGLE_MEDIA_FIELD_REFS
+            .iter()
+            .any(|(_, ref_field)| *ref_field == field)
+            || ARRAY_MEDIA_FIELD_REFS
+                .iter()
+                .any(|(_, ref_field)| *ref_field == field)
     }
 
     fn is_empty_media_value(value: Option<&Value>) -> bool {
@@ -1639,6 +1651,44 @@ mod tests {
             loaded.workflow.nodes[0].data["inputImages"][1],
             "https://example.invalid/image.png"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_hydrates_split_grid_source_but_preserves_ref_field() {
+        let media = "data:image/png;base64,aGVsbG8=";
+        let mut workflow = WorkflowFile::blank();
+        workflow.name = "split-grid project refs".to_string();
+        workflow.nodes.push(WorkflowNode::new(
+            "split",
+            NodeType::SplitGrid,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "sourceImage": media,
+                "sourceImageRef": "",
+                "gridRows": 1,
+                "gridCols": 1
+            }),
+        ));
+        let root = unique_temp_dir("gemed-project-split-grid-hydrate-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        project.save(&workflow).expect("save split grid project");
+        let saved_json = std::fs::read_to_string(root.join(PROJECT_WORKFLOW_FILE)).unwrap();
+        let saved_value: serde_json::Value = serde_json::from_str(&saved_json).unwrap();
+        let saved_data = &saved_value["nodes"][0]["data"];
+        let saved_ref = saved_data["sourceImageRef"]
+            .as_str()
+            .expect("source ref written");
+        assert_eq!(saved_data["sourceImage"], serde_json::Value::Null);
+        assert!(saved_ref.starts_with(PROJECT_MEDIA_URL_PREFIX));
+
+        let loaded = project.load().expect("load split grid project");
+        let loaded_data = &loaded.workflow.nodes[0].data;
+        assert_eq!(loaded_data["sourceImage"], media);
+        assert_eq!(loaded_data["sourceImageRef"], saved_ref);
 
         let _ = std::fs::remove_dir_all(root);
     }

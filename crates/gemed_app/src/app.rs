@@ -3920,4 +3920,61 @@ mod tests {
         assert!(media_overlay_from_preview(&project_ref_preview).is_none());
         assert!(media_overlay_from_preview(&large_inline_preview).is_none());
     }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_transform_sample_runs_after_project_roundtrip() {
+        let workflow = WorkflowFile::media_transform_example();
+        let executed = gemed_executor::execute_simple_workflow(&workflow)
+            .expect("transform sample runs before save")
+            .workflow;
+        let root = unique_test_project_dir("gemed-transform-project-roundtrip");
+        let project = gemed_storage::desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let snapshot = project.save(&executed).expect("save transform project");
+
+        assert!(!snapshot.manifest.media_files.is_empty());
+        let saved_json = std::fs::read_to_string(root.join(gemed_storage::PROJECT_WORKFLOW_FILE))
+            .expect("saved workflow json exists");
+        assert!(saved_json.contains(gemed_storage::PROJECT_MEDIA_URL_PREFIX));
+        assert!(!saved_json.contains("data:image/png"));
+
+        let loaded = project.load().expect("load transform project").workflow;
+        let rerun = gemed_executor::execute_simple_workflow(&loaded)
+            .expect("transform sample reruns after hydration");
+        let split = rerun
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "transform_split")
+            .expect("split node exists");
+        let images = split
+            .data
+            .get("images")
+            .and_then(serde_json::Value::as_array)
+            .expect("split images remain hydrated and executable");
+
+        assert_eq!(images.len(), 4);
+        assert!(images.iter().all(|image| {
+            image
+                .as_str()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,"))
+        }));
+        assert_eq!(rerun.report.error_count(), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    fn unique_test_project_dir(prefix: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "{}-{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
 }
