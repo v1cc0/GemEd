@@ -2237,6 +2237,9 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
         if let Some(filename) = filename {
             lines.push(filename);
         }
+        if let Some(metadata) = plan.get("metadata") {
+            lines.extend(glb_metadata_lines(metadata));
+        }
         lines.push(if can_open {
             "preview: URI can be opened by the WebView once a GLB/WebGL adapter is wired"
                 .to_string()
@@ -2283,6 +2286,63 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
             "WebGL render and PNG capture still need a platform adapter.".to_string(),
         ],
     }
+}
+
+fn glb_metadata_lines(metadata: &Value) -> Vec<String> {
+    let Some(metadata) = metadata.as_object() else {
+        return Vec::new();
+    };
+    let count = |field: &str| {
+        metadata
+            .get(field)
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    };
+
+    let version = metadata
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|version| format!("GLB v{version}"))
+        .unwrap_or_else(|| "GLB version unknown".to_string());
+    let declared = metadata
+        .get("declaredByteLength")
+        .and_then(Value::as_u64)
+        .map(human_media_bytes)
+        .unwrap_or_else(|| "unknown size".to_string());
+    let json_chunk = metadata
+        .get("jsonChunkByteLength")
+        .and_then(Value::as_u64)
+        .map(human_media_bytes)
+        .unwrap_or_else(|| "unknown JSON chunk".to_string());
+    let asset_version = metadata
+        .get("assetVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" · glTF {value}"))
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!("metadata: {version}{asset_version} · {declared} declared · JSON {json_chunk}"),
+        format!(
+            "assets: scenes {} · nodes {} · meshes {} · materials {} · animations {} · images {} · buffers {}",
+            count("sceneCount"),
+            count("nodeCount"),
+            count("meshCount"),
+            count("materialCount"),
+            count("animationCount"),
+            count("imageCount"),
+            count("bufferCount"),
+        ),
+    ];
+    if let Some(generator) = metadata
+        .get("generator")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("generator: {}", truncate_chars(generator, 80)));
+    }
+    lines
 }
 
 fn human_media_bytes(bytes: u64) -> String {
@@ -5336,7 +5396,7 @@ mod tests {
                 NodeType::GlbViewer,
                 Position { x: 0.0, y: 0.0 },
                 serde_json::json!({
-                    "glbUrl": "data:model/gltf-binary;base64,AAAA",
+                    "glbUrl": test_inline_glb_data_url(),
                     "filename": "inline.glb"
                 }),
             )],
@@ -5364,6 +5424,17 @@ mod tests {
             insight
                 .lines
                 .iter()
+                .any(|line| line.contains("metadata: GLB v2") && line.contains("glTF 2.0"))
+        );
+        assert!(insight.lines.iter().any(|line| {
+            line.contains("assets: scenes 1")
+                && line.contains("nodes 1")
+                && line.contains("meshes 1")
+        }));
+        assert!(
+            insight
+                .lines
+                .iter()
                 .any(|line| line.contains("GLB/WebGL render adapter pending"))
         );
         assert!(
@@ -5372,6 +5443,10 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("no captured image emitted"))
         );
+    }
+
+    fn test_inline_glb_data_url() -> &'static str {
+        "data:model/gltf-binary;base64,Z2xURgIAAACsAAAAmAAAAEpTT057ImFzc2V0Ijp7InZlcnNpb24iOiIyLjAiLCJnZW5lcmF0b3IiOiJHZW1FZCB0ZXN0In0sInNjZW5lcyI6W3t9XSwibm9kZXMiOlt7fV0sIm1lc2hlcyI6W3t9XSwibWF0ZXJpYWxzIjpbe31dLCJhbmltYXRpb25zIjpbXSwiaW1hZ2VzIjpbXSwiYnVmZmVycyI6W119IA=="
     }
 
     #[test]

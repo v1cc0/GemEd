@@ -27,6 +27,8 @@ pub enum MediaTransformError {
     UnsupportedModel3dUri(String),
     #[error("unsupported inline 3D model media type `{0}`")]
     UnsupportedModel3dMime(String),
+    #[error("invalid inline GLB payload: {0}")]
+    InvalidInlineGlb(String),
     #[error("invalid data URL")]
     InvalidDataUrl,
     #[error("base64 image payload is invalid: {0}")]
@@ -156,10 +158,31 @@ pub struct Model3dUriMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GlbMetadata {
+    pub version: u32,
+    pub declared_byte_length: usize,
+    pub json_chunk_byte_length: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
+    pub scene_count: usize,
+    pub node_count: usize,
+    pub mesh_count: usize,
+    pub material_count: usize,
+    pub animation_count: usize,
+    pub image_count: usize,
+    pub buffer_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlbViewerPlan {
     pub source: Model3dUriMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<GlbMetadata>,
     pub viewer_adapter: String,
     pub requires_webgl_adapter: bool,
     pub can_open_uri_directly: bool,
@@ -254,6 +277,7 @@ pub fn plan_glb_viewer(
     filename: Option<&str>,
 ) -> Result<GlbViewerPlan, MediaTransformError> {
     let source = inspect_model3d_uri(value)?;
+    let metadata = inspect_inline_glb_metadata(value)?;
     let can_open_uri_directly = source.renderable_in_webview;
     Ok(GlbViewerPlan {
         source,
@@ -261,6 +285,7 @@ pub fn plan_glb_viewer(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        metadata,
         viewer_adapter: "webgl-glb-viewer".to_string(),
         requires_webgl_adapter: true,
         can_open_uri_directly,
@@ -415,6 +440,127 @@ fn inspect_model3d_uri(value: &str) -> Result<Model3dUriMetadata, MediaTransform
     Err(MediaTransformError::UnsupportedModel3dUri(truncate_middle(
         uri, 72,
     )))
+}
+
+fn inspect_inline_glb_metadata(value: &str) -> Result<Option<GlbMetadata>, MediaTransformError> {
+    let Some(parts) = data_url_parts(value) else {
+        return Ok(None);
+    };
+    let mime = parts.mime.trim().to_ascii_lowercase();
+    if mime != "model/gltf-binary" {
+        return Ok(None);
+    }
+    if !parts.is_base64 {
+        return Err(MediaTransformError::InvalidInlineGlb(
+            "binary GLB data URLs must be base64 encoded".to_string(),
+        ));
+    }
+
+    let bytes = decode_base64_data_url_payload(parts.payload)
+        .map_err(|err| MediaTransformError::InvalidInlineGlb(err.to_string()))?;
+    parse_glb_metadata(&bytes).map(Some)
+}
+
+fn decode_base64_data_url_payload(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let payload = value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    general_purpose::STANDARD.decode(payload)
+}
+
+fn parse_glb_metadata(bytes: &[u8]) -> Result<GlbMetadata, MediaTransformError> {
+    const GLB_HEADER_LEN: usize = 12;
+    const GLB_CHUNK_HEADER_LEN: usize = 8;
+    const GLB_V2: u32 = 2;
+
+    if bytes.len() < GLB_HEADER_LEN + GLB_CHUNK_HEADER_LEN {
+        return Err(invalid_inline_glb("file is shorter than the GLB header"));
+    }
+    if bytes.get(0..4) != Some(b"glTF") {
+        return Err(invalid_inline_glb("missing glTF magic header"));
+    }
+
+    let version = read_glb_u32(bytes, 4)?;
+    if version != GLB_V2 {
+        return Err(invalid_inline_glb(format!(
+            "unsupported GLB version {version}; expected 2"
+        )));
+    }
+
+    let declared_byte_length = read_glb_u32(bytes, 8)? as usize;
+    if declared_byte_length != bytes.len() {
+        return Err(invalid_inline_glb(format!(
+            "declared length {declared_byte_length} does not match decoded length {}",
+            bytes.len()
+        )));
+    }
+
+    let json_chunk_byte_length = read_glb_u32(bytes, GLB_HEADER_LEN)? as usize;
+    if json_chunk_byte_length == 0 || !json_chunk_byte_length.is_multiple_of(4) {
+        return Err(invalid_inline_glb(
+            "JSON chunk length must be a non-zero 4-byte multiple",
+        ));
+    }
+    let chunk_type_offset = GLB_HEADER_LEN + 4;
+    if bytes.get(chunk_type_offset..chunk_type_offset + 4) != Some(b"JSON") {
+        return Err(invalid_inline_glb("first GLB chunk is not JSON"));
+    }
+
+    let json_start = GLB_HEADER_LEN + GLB_CHUNK_HEADER_LEN;
+    let json_end = json_start
+        .checked_add(json_chunk_byte_length)
+        .ok_or_else(|| invalid_inline_glb("JSON chunk length overflows"))?;
+    let json_bytes = bytes
+        .get(json_start..json_end)
+        .ok_or_else(|| invalid_inline_glb("JSON chunk exceeds declared GLB length"))?;
+    let json: Value = serde_json::from_slice(json_bytes)
+        .map_err(|err| invalid_inline_glb(format!("JSON chunk is invalid: {err}")))?;
+
+    Ok(GlbMetadata {
+        version,
+        declared_byte_length,
+        json_chunk_byte_length,
+        asset_version: gltf_asset_string(&json, "version"),
+        generator: gltf_asset_string(&json, "generator"),
+        scene_count: gltf_array_count(&json, "scenes"),
+        node_count: gltf_array_count(&json, "nodes"),
+        mesh_count: gltf_array_count(&json, "meshes"),
+        material_count: gltf_array_count(&json, "materials"),
+        animation_count: gltf_array_count(&json, "animations"),
+        image_count: gltf_array_count(&json, "images"),
+        buffer_count: gltf_array_count(&json, "buffers"),
+    })
+}
+
+fn read_glb_u32(bytes: &[u8], offset: usize) -> Result<u32, MediaTransformError> {
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| invalid_inline_glb("unexpected end of GLB header"))?;
+    Ok(u32::from_le_bytes(
+        slice.try_into().expect("slice length checked"),
+    ))
+}
+
+fn gltf_asset_string(json: &Value, field: &str) -> Option<String> {
+    json.get("asset")
+        .and_then(Value::as_object)
+        .and_then(|asset| asset.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn gltf_array_count(json: &Value, field: &str) -> usize {
+    json.get(field)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+fn invalid_inline_glb(message: impl Into<String>) -> MediaTransformError {
+    MediaTransformError::InvalidInlineGlb(message.into())
 }
 
 struct DecodedInlineImage {
@@ -1562,6 +1708,7 @@ mod tests {
         assert_eq!(plan.source.mime.as_deref(), Some("model/gltf-binary"));
         assert!(!plan.source.renderable_in_webview);
         assert_eq!(plan.filename.as_deref(), Some("demo-model.glb"));
+        assert_eq!(plan.metadata, None);
         assert_eq!(plan.viewer_adapter, "webgl-glb-viewer");
         assert!(plan.requires_webgl_adapter);
         assert!(!plan.can_open_uri_directly);
@@ -1570,16 +1717,38 @@ mod tests {
     }
 
     #[test]
-    fn glb_viewer_plan_accepts_inline_glb_metadata_without_decoding() {
-        let plan = plan_glb_viewer("data:model/gltf-binary;base64,AAAA", None)
-            .expect("inline GLB can be planned");
+    fn glb_viewer_plan_parses_inline_glb_metadata() {
+        let bytes = minimal_glb_bytes();
+        let plan =
+            plan_glb_viewer(&minimal_glb_data_url(), None).expect("inline GLB can be planned");
 
         assert_eq!(plan.source.uri_kind, MediaUriKind::InlineData);
         assert_eq!(plan.source.mime.as_deref(), Some("model/gltf-binary"));
-        assert_eq!(plan.source.byte_length, Some(3));
+        assert_eq!(plan.source.byte_length, Some(bytes.len()));
         assert!(plan.source.renderable_in_webview);
         assert!(plan.can_open_uri_directly);
         assert!(plan.requires_webgl_adapter);
+        let metadata = plan.metadata.expect("inline GLB metadata is parsed");
+        assert_eq!(metadata.version, 2);
+        assert_eq!(metadata.declared_byte_length, bytes.len());
+        assert_eq!(metadata.json_chunk_byte_length % 4, 0);
+        assert_eq!(metadata.asset_version.as_deref(), Some("2.0"));
+        assert_eq!(metadata.generator.as_deref(), Some("GemEd test"));
+        assert_eq!(metadata.scene_count, 1);
+        assert_eq!(metadata.node_count, 1);
+        assert_eq!(metadata.mesh_count, 1);
+        assert_eq!(metadata.material_count, 1);
+        assert_eq!(metadata.animation_count, 0);
+        assert_eq!(metadata.image_count, 0);
+        assert_eq!(metadata.buffer_count, 1);
+    }
+
+    #[test]
+    fn glb_viewer_plan_rejects_malformed_inline_glb() {
+        let err = plan_glb_viewer("data:model/gltf-binary;base64,AAAA", None)
+            .expect_err("malformed inline GLB should not be planned");
+
+        assert!(err.to_string().contains("invalid inline GLB payload"));
     }
 
     #[test]
@@ -1591,6 +1760,30 @@ mod tests {
             err.to_string()
                 .contains("unsupported inline 3D model media type")
         );
+    }
+
+    fn minimal_glb_data_url() -> String {
+        format!(
+            "data:model/gltf-binary;base64,{}",
+            general_purpose::STANDARD.encode(minimal_glb_bytes())
+        )
+    }
+
+    fn minimal_glb_bytes() -> Vec<u8> {
+        let mut json_chunk = br#"{"asset":{"version":"2.0","generator":"GemEd test"},"scenes":[{}],"nodes":[{}],"meshes":[{}],"materials":[{}],"animations":[],"images":[],"buffers":[{}]}"#.to_vec();
+        while !json_chunk.len().is_multiple_of(4) {
+            json_chunk.push(b' ');
+        }
+
+        let declared_len = 12 + 8 + json_chunk.len();
+        let mut bytes = Vec::with_capacity(declared_len);
+        bytes.extend_from_slice(b"glTF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&(declared_len as u32).to_le_bytes());
+        bytes.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"JSON");
+        bytes.extend_from_slice(&json_chunk);
+        bytes
     }
 
     #[test]
