@@ -732,6 +732,16 @@ fn Sidebar(
                 .ok()
                 .map(|sets| (node.id.clone(), sets))
         });
+    let selected_frame_capture = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .filter(|node| node.node_type == NodeType::VideoFrameGrab)
+        .map(|node| {
+            (
+                node.id.clone(),
+                video_frame_capture_request(node.id.clone(), node),
+            )
+        });
     let draft_summary = connection_draft
         .read()
         .as_ref()
@@ -1157,6 +1167,46 @@ fn Sidebar(
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((frame_node_id, capture_request)) = selected_frame_capture.as_ref() {
+                    p { class: "handle-hint",
+                        "Video Frame Grab `{frame_node_id}` can use the browser/WebView adapter only after Run Local records a renderable frameGrabPlan."
+                    }
+                    match capture_request {
+                        Ok(request) => {
+                            let frame_node_id = frame_node_id.clone();
+                            let source_summary = request.source_summary();
+                            rsx! {
+                                div { class: "edge-row",
+                                    code { "{source_summary}" }
+                                    button {
+                                        class: "mini-action neutral",
+                                        onclick: move |event: MouseEvent| {
+                                            event.stop_propagation();
+                                            let frame_node_id = frame_node_id.clone();
+                                            async move {
+                                                capture_video_frame_with_webview_adapter(
+                                                    frame_node_id,
+                                                    workflow,
+                                                    json_text,
+                                                    message,
+                                                    execution_report,
+                                                ).await;
+                                            }
+                                        },
+                                        "Capture"
+                                    }
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            rsx! {
+                                p { class: "viewport-status",
+                                    "Adapter unavailable: {reason}"
                                 }
                             }
                         }
@@ -1970,6 +2020,15 @@ fn node_card_insight(node: &WorkflowNode) -> Option<NodeInsight> {
 
 fn video_frame_grab_insight(node: &WorkflowNode) -> NodeInsight {
     if let Some(plan) = node.data.get("frameGrabPlan").and_then(Value::as_object) {
+        let captured_output = node
+            .data
+            .get("outputImage")
+            .and_then(Value::as_str)
+            .filter(|value| value.starts_with("data:image/"));
+        let capture_result = node
+            .data
+            .get("frameCaptureResult")
+            .and_then(Value::as_object);
         let source = plan.get("source").unwrap_or(&Value::Null);
         let uri_kind = source
             .get("uriKind")
@@ -2016,16 +2075,30 @@ fn video_frame_grab_insight(node: &WorkflowNode) -> NodeInsight {
             seek_line,
             preview_line,
         ];
-        if requires_decode {
+        if captured_output.is_some() {
+            let adapter = capture_result
+                .and_then(|result| result.get("adapter"))
+                .and_then(Value::as_str)
+                .unwrap_or("webview-video-canvas");
+            let dimensions = capture_result.and_then(|result| {
+                let width = result.get("width").and_then(Value::as_u64)?;
+                let height = result.get("height").and_then(Value::as_u64)?;
+                Some(format!(" · {width}×{height}"))
+            });
+            lines.push(format!(
+                "capture: {adapter} emitted PNG output{}",
+                dimensions.unwrap_or_default()
+            ));
+        } else if requires_decode {
             lines.push(
                 "adapter: decode/canvas PNG capture pending; no output image emitted".to_string(),
             );
         }
         return NodeInsight {
-            class: if requires_decode {
-                "node-insight adapter"
-            } else {
+            class: if captured_output.is_some() || !requires_decode {
                 "node-insight ready"
+            } else {
+                "node-insight adapter"
             },
             title: "Frame grab plan".to_string(),
             lines,
@@ -2641,6 +2714,380 @@ async fn copy_media_uri(uri: String) -> CopyStatus {
     match document::eval(&script).await {
         Ok(value) => CopyStatus::from_eval_value(&value),
         Err(err) => CopyStatus::failed(format!("Copy unavailable: {err}")),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct VideoFrameCaptureRequest {
+    node_id: String,
+    source_uri: String,
+    frame_position: String,
+    requested_seek_seconds: Option<f64>,
+    timeout_ms: u32,
+}
+
+impl VideoFrameCaptureRequest {
+    fn source_summary(&self) -> String {
+        let seek = self
+            .requested_seek_seconds
+            .map(|seconds| format!("{seconds:.3}s"))
+            .unwrap_or_else(|| "duration-based".to_string());
+        format!("{} frame · seek {seek}", self.frame_position)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct VideoFrameCaptureSuccess {
+    image: String,
+    width: Option<u64>,
+    height: Option<u64>,
+    seek_seconds: Option<f64>,
+}
+
+fn video_frame_capture_request(
+    node_id: String,
+    node: &WorkflowNode,
+) -> Result<VideoFrameCaptureRequest, String> {
+    let source_uri = node
+        .data
+        .get("sourceVideo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "Run Local first so frameGrabPlan records the source video.".to_string())?;
+    let plan = node
+        .data
+        .get("frameGrabPlan")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "Run Local first so frameGrabPlan records source/seek metadata.".to_string()
+        })?;
+    let source = plan
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "frameGrabPlan is missing source metadata; run local planning again.".to_string()
+        })?;
+    let renderable = source
+        .get("renderableInWebview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !renderable {
+        let uri_kind = source
+            .get("uriKind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!(
+            "source `{uri_kind}` must be hydrated to a WebView-renderable URI before capture"
+        ));
+    }
+    let frame_position = plan
+        .get("framePosition")
+        .and_then(Value::as_str)
+        .or_else(|| node.data.get("framePosition").and_then(Value::as_str))
+        .unwrap_or("first")
+        .to_string();
+    let requested_seek_seconds = plan.get("requestedSeekSeconds").and_then(Value::as_f64);
+
+    Ok(VideoFrameCaptureRequest {
+        node_id,
+        source_uri,
+        frame_position,
+        requested_seek_seconds,
+        timeout_ms: 30_000,
+    })
+}
+
+fn video_frame_capture_script(request: &VideoFrameCaptureRequest) -> String {
+    let source_uri =
+        serde_json::to_string(&request.source_uri).unwrap_or_else(|_| "\"\"".to_string());
+    let frame_position =
+        serde_json::to_string(&request.frame_position).unwrap_or_else(|_| "\"first\"".to_string());
+    let requested_seek_seconds = request
+        .requested_seek_seconds
+        .map_or_else(|| "null".to_string(), |seconds| seconds.to_string());
+    let timeout_ms = request.timeout_ms;
+
+    format!(
+        r#"
+const sourceUri = {source_uri};
+const framePosition = {frame_position};
+const requestedSeekSeconds = {requested_seek_seconds};
+const timeoutMs = {timeout_ms};
+let blobUrl = null;
+let timeoutId = null;
+const video = document.createElement("video");
+video.crossOrigin = "anonymous";
+video.preload = "auto";
+video.muted = true;
+video.playsInline = true;
+
+const cleanup = () => {{
+    if (timeoutId !== null) {{
+        clearTimeout(timeoutId);
+        timeoutId = null;
+    }}
+    if (blobUrl !== null) {{
+        URL.revokeObjectURL(blobUrl);
+        blobUrl = null;
+    }}
+    video.removeAttribute("src");
+    try {{ video.load(); }} catch (_) {{}}
+}};
+
+try {{
+    const result = await new Promise((resolve, reject) => {{
+        const fail = (error) => reject(error instanceof Error ? error : new Error(String(error)));
+        timeoutId = setTimeout(() => fail(new Error("Frame extraction timed out")), timeoutMs);
+
+        video.onloadedmetadata = () => {{
+            const duration = Number.isFinite(video.duration) ? video.duration : null;
+            const seekSeconds = requestedSeekSeconds !== null
+                ? requestedSeekSeconds
+                : (framePosition === "last" && duration !== null ? Math.max(0, duration - 0.1) : 0.001);
+            video.currentTime = seekSeconds;
+        }};
+
+        video.onseeked = () => {{
+            try {{
+                const width = video.videoWidth;
+                const height = video.videoHeight;
+                if (!width || !height) {{
+                    throw new Error("Video metadata did not expose frame dimensions");
+                }}
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const context = canvas.getContext("2d");
+                if (!context) {{
+                    throw new Error("Could not get canvas 2D context");
+                }}
+                context.drawImage(video, 0, 0, width, height);
+                const image = canvas.toDataURL("image/png");
+                resolve({{
+                    ok: true,
+                    image,
+                    width,
+                    height,
+                    seekSeconds: video.currentTime,
+                    duration: Number.isFinite(video.duration) ? video.duration : null,
+                    adapter: "webview-video-canvas"
+                }});
+            }} catch (error) {{
+                fail(error);
+            }}
+        }};
+
+        video.onerror = () => fail(new Error("Failed to load video for frame extraction"));
+
+        if (sourceUri.startsWith("data:")) {{
+            fetch(sourceUri)
+                .then((response) => response.blob())
+                .then((blob) => {{
+                    blobUrl = URL.createObjectURL(blob);
+                    video.src = blobUrl;
+                }})
+                .catch(() => {{
+                    video.src = sourceUri;
+                }});
+        }} else {{
+            video.src = sourceUri;
+        }}
+    }});
+    cleanup();
+    return result;
+}} catch (error) {{
+    cleanup();
+    return {{ ok: false, error: String(error && (error.message || error)), adapter: "webview-video-canvas" }};
+}}
+"#
+    )
+}
+
+fn video_frame_capture_success_from_eval_value(
+    value: &Value,
+) -> Result<VideoFrameCaptureSuccess, String> {
+    if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or("frame capture adapter returned an unknown error")
+            .to_string());
+    }
+    let image = value
+        .get("image")
+        .and_then(Value::as_str)
+        .filter(|image| image.starts_with("data:image/png;base64,"))
+        .ok_or_else(|| "frame capture adapter did not return a PNG data URL".to_string())?;
+    Ok(VideoFrameCaptureSuccess {
+        image: image.to_string(),
+        width: value.get("width").and_then(Value::as_u64),
+        height: value.get("height").and_then(Value::as_u64),
+        seek_seconds: value.get("seekSeconds").and_then(Value::as_f64),
+    })
+}
+
+async fn capture_video_frame_with_webview_adapter(
+    node_id: String,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    mut message: Signal<Message>,
+    mut execution_report: Signal<Option<SimpleExecutionReport>>,
+) {
+    let request = {
+        let snapshot = workflow.read();
+        let Some(node) = snapshot.nodes.iter().find(|node| node.id == node_id) else {
+            message.set(Message::err(format!(
+                "Video Frame Grab `{node_id}` disappeared."
+            )));
+            return;
+        };
+        match video_frame_capture_request(node_id.clone(), node) {
+            Ok(request) => request,
+            Err(err) => {
+                message.set(Message::err(format!("Frame capture unavailable: {err}")));
+                return;
+            }
+        }
+    };
+    message.set(Message::ok(format!(
+        "Capturing `{}` via WebView video/canvas adapter...",
+        request.node_id
+    )));
+
+    let script = video_frame_capture_script(&request);
+    let eval_value = match document::eval(&script).await {
+        Ok(value) => value,
+        Err(err) => {
+            message.set(Message::err(format!("Frame capture eval failed: {err}")));
+            return;
+        }
+    };
+    let success = match video_frame_capture_success_from_eval_value(&eval_value) {
+        Ok(success) => success,
+        Err(err) => {
+            message.set(Message::err(format!("Frame capture failed: {err}")));
+            return;
+        }
+    };
+
+    let mut next = workflow.read().clone();
+    match apply_video_frame_capture_success(&mut next, &request.node_id, &success) {
+        Ok(routed_count) => match next.to_pretty_json() {
+            Ok(json) => {
+                workflow.set(next);
+                json_text.set(json);
+                execution_report.set(None);
+                let size = match (success.width, success.height) {
+                    (Some(width), Some(height)) => format!(" · {width}×{height}"),
+                    _ => String::new(),
+                };
+                message.set(Message::ok(format!(
+                    "Captured frame for `{}`{size}; routed to {routed_count} downstream output node(s).",
+                    request.node_id
+                )));
+            }
+            Err(err) => message.set(Message::err(format!(
+                "Captured frame but failed to export JSON: {err}"
+            ))),
+        },
+        Err(err) => message.set(Message::err(err)),
+    }
+}
+
+fn apply_video_frame_capture_success(
+    workflow: &mut WorkflowFile,
+    node_id: &str,
+    success: &VideoFrameCaptureSuccess,
+) -> Result<usize, String> {
+    let Some(index) = workflow
+        .nodes
+        .iter()
+        .position(|node| node.id == node_id && node.node_type == NodeType::VideoFrameGrab)
+    else {
+        return Err(format!("Video Frame Grab `{node_id}` was not found."));
+    };
+    let image = success.image.clone();
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "outputImage",
+        Value::String(image.clone()),
+    );
+    set_node_data_field(&mut workflow.nodes[index], "outputImageRef", Value::Null);
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "frameCaptureResult",
+        serde_json::json!({
+            "adapter": "webview-video-canvas",
+            "width": success.width,
+            "height": success.height,
+            "seekSeconds": success.seek_seconds,
+            "outputMime": "image/png"
+        }),
+    );
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "__mediaAdapter",
+        Value::String("webview-video-canvas".to_string()),
+    );
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "status",
+        Value::String("complete".to_string()),
+    );
+    set_node_data_field(&mut workflow.nodes[index], "error", Value::Null);
+
+    let downstream_targets = workflow
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.source == node_id
+                && edge
+                    .source_handle
+                    .as_deref()
+                    .map(|handle| handle == "image")
+                    .unwrap_or(true)
+        })
+        .map(|edge| (edge.target.clone(), edge.target_handle.clone()))
+        .collect::<Vec<_>>();
+    let mut routed_count = 0;
+    for (target_id, target_handle) in downstream_targets {
+        if !target_handle
+            .as_deref()
+            .map(|handle| handle == "image")
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(target) = workflow.nodes.iter_mut().find(|node| node.id == target_id) else {
+            continue;
+        };
+        match target.node_type {
+            NodeType::Output => {
+                set_node_data_field(target, "image", Value::String(image.clone()));
+                set_node_data_field(target, "contentType", Value::String("image".to_string()));
+                set_node_data_field(target, "status", Value::String("complete".to_string()));
+                routed_count += 1;
+            }
+            NodeType::OutputGallery => {
+                set_node_data_field(target, "images", serde_json::json!([image.clone()]));
+                set_node_data_field(target, "status", Value::String("complete".to_string()));
+                routed_count += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(routed_count)
+}
+
+fn set_node_data_field(node: &mut WorkflowNode, key: &str, value: Value) {
+    if !node.data.is_object() {
+        node.data = serde_json::json!({});
+    }
+    if let Some(map) = node.data.as_object_mut() {
+        map.insert(key.to_string(), value);
     }
 }
 
@@ -4365,19 +4812,22 @@ impl CopyStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, CopyStatus, NODE_CARD_HEIGHT, NODE_CARD_WIDTH, bounds_for_node_ids,
+        CanvasRect, CopyStatus, NODE_CARD_HEIGHT, NODE_CARD_WIDTH, VideoFrameCaptureRequest,
+        VideoFrameCaptureSuccess, apply_video_frame_capture_success, bounds_for_node_ids,
         copy_media_uri_script, ensure_json_extension, media_error_message,
         media_overlay_from_preview, media_preview_kind_class, node_card_insight,
         node_ids_intersecting_rect, platform_provider_secret_setup_message,
         provider_capability_list, provider_default_model_placeholder, provider_secret_setup_hint,
         sanitize_optional_provider_base_url, sanitize_optional_provider_text,
-        viewport_for_node_ids, workflow_json_filename,
+        video_frame_capture_request, video_frame_capture_script,
+        video_frame_capture_success_from_eval_value, viewport_for_node_ids, workflow_json_filename,
     };
     use gemed_core::{
-        NodeType, Position, WorkflowFile, WorkflowNode, generate_split_grid_children,
+        NodeType, Position, WorkflowEdge, WorkflowFile, WorkflowNode, generate_split_grid_children,
     };
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
+    use serde_json::Value;
     use std::path::PathBuf;
 
     #[test]
@@ -4545,6 +4995,169 @@ mod tests {
             rejected.class_name("media-overlay-copy-status"),
             "media-overlay-copy-status err"
         );
+    }
+
+    #[test]
+    fn video_frame_capture_request_requires_renderable_plan() {
+        let workflow = WorkflowFile::video_frame_grab_example();
+        let planned =
+            gemed_executor::execute_simple_workflow(&workflow).expect("frame sample plans");
+        let grab = planned
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "frame_grab")
+            .expect("frame grab exists");
+
+        let request = video_frame_capture_request("frame_grab".to_string(), grab)
+            .expect("inline video plan is renderable");
+
+        assert_eq!(request.node_id, "frame_grab");
+        assert!(request.source_uri.starts_with("data:video/mp4;base64,"));
+        assert_eq!(request.frame_position, "first");
+        assert_eq!(request.requested_seek_seconds, Some(0.001));
+
+        let project_ref = WorkflowNode::new(
+            "grab",
+            NodeType::VideoFrameGrab,
+            Position { x: 0.0, y: 0.0 },
+            serde_json::json!({
+                "sourceVideo": "gemed-media://media/clip.mp4",
+                "frameGrabPlan": {
+                    "source": {
+                        "uriKind": "projectReference",
+                        "mime": "video/mp4",
+                        "renderableInWebview": false
+                    },
+                    "framePosition": "first",
+                    "requestedSeekSeconds": 0.001,
+                    "seekRequiresDuration": false,
+                    "outputMime": "image/png",
+                    "requiresDecodeAdapter": true
+                }
+            }),
+        );
+        let err = video_frame_capture_request("grab".to_string(), &project_ref)
+            .expect_err("project refs need hydration first");
+        assert!(err.contains("projectReference"));
+    }
+
+    #[test]
+    fn video_frame_capture_script_declares_real_video_canvas_contract() {
+        let request = VideoFrameCaptureRequest {
+            node_id: "grab".to_string(),
+            source_uri: "data:video/mp4;base64,AAAA".to_string(),
+            frame_position: "last".to_string(),
+            requested_seek_seconds: None,
+            timeout_ms: 1234,
+        };
+
+        let script = video_frame_capture_script(&request);
+
+        assert!(script.contains("document.createElement(\"video\")"));
+        assert!(script.contains("document.createElement(\"canvas\")"));
+        assert!(script.contains("context.drawImage(video"));
+        assert!(script.contains("canvas.toDataURL(\"image/png\")"));
+        assert!(script.contains("URL.revokeObjectURL(blobUrl)"));
+        assert!(script.contains("timeoutMs = 1234"));
+        assert!(script.contains("\"webview-video-canvas\""));
+    }
+
+    #[test]
+    fn video_frame_capture_success_updates_node_and_downstream_output() {
+        let mut workflow = WorkflowFile {
+            name: "capture".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "grab",
+                    NodeType::VideoFrameGrab,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({
+                        "sourceVideo": "data:video/mp4;base64,AAAA",
+                        "outputImage": null,
+                        "frameGrabPlan": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::with_handles(
+                "e1", "grab", "output", "image", "image",
+            )],
+            ..WorkflowFile::blank()
+        };
+        let success = VideoFrameCaptureSuccess {
+            image: "data:image/png;base64,AAAA".to_string(),
+            width: Some(16),
+            height: Some(9),
+            seek_seconds: Some(0.001),
+        };
+
+        let routed = apply_video_frame_capture_success(&mut workflow, "grab", &success)
+            .expect("capture applies");
+        let grab = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "grab")
+            .unwrap();
+        let output = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+
+        assert_eq!(routed, 1);
+        assert_eq!(
+            grab.data.get("outputImage").and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            grab.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("webview-video-canvas")
+        );
+        assert_eq!(
+            grab.data
+                .get("frameCaptureResult")
+                .and_then(|result| result.get("width"))
+                .and_then(Value::as_u64),
+            Some(16)
+        );
+        assert_eq!(
+            output.data.get("image").and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            output.data.get("contentType").and_then(Value::as_str),
+            Some("image")
+        );
+
+        let insight = node_card_insight(grab).expect("frame grab insight remains available");
+        assert_eq!(insight.class, "node-insight ready");
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("webview-video-canvas emitted PNG output"))
+        );
+    }
+
+    #[test]
+    fn video_frame_capture_eval_parser_rejects_failed_or_non_png_results() {
+        let failed = video_frame_capture_success_from_eval_value(
+            &serde_json::json!({ "ok": false, "error": "decode failed" }),
+        )
+        .expect_err("adapter errors propagate");
+        let non_png = video_frame_capture_success_from_eval_value(
+            &serde_json::json!({ "ok": true, "image": "data:image/jpeg;base64,AAAA" }),
+        )
+        .expect_err("only PNG frame captures are accepted");
+
+        assert_eq!(failed, "decode failed");
+        assert!(non_png.contains("PNG data URL"));
     }
 
     #[test]
