@@ -1963,6 +1963,7 @@ fn node_card_insight(node: &WorkflowNode) -> Option<NodeInsight> {
     match node.node_type {
         NodeType::VideoFrameGrab => Some(video_frame_grab_insight(node)),
         NodeType::SplitGrid => split_grid_insight(node),
+        NodeType::GlbViewer => Some(glb_viewer_insight(node)),
         _ => None,
     }
 }
@@ -2120,6 +2121,97 @@ fn split_grid_insight(node: &WorkflowNode) -> Option<NodeInsight> {
     })
 }
 
+fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
+    if let Some(plan) = node.data.get("glbViewerPlan").and_then(Value::as_object) {
+        let source = plan.get("source").unwrap_or(&Value::Null);
+        let uri_kind = source
+            .get("uriKind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let mime = source
+            .get("mime")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown MIME");
+        let size = source
+            .get("byteLength")
+            .and_then(Value::as_u64)
+            .map(|bytes| format!(" · {}", human_media_bytes(bytes)));
+        let renderable = source
+            .get("renderableInWebview")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let filename = plan
+            .get("filename")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("file: {value}"));
+        let can_open = plan
+            .get("canOpenUriDirectly")
+            .and_then(Value::as_bool)
+            .unwrap_or(renderable);
+        let requires_webgl = plan
+            .get("requiresWebglAdapter")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let requires_capture = plan
+            .get("requiresCaptureAdapter")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut lines = vec![format!(
+            "source: {uri_kind} · {mime}{}",
+            size.unwrap_or_default()
+        )];
+        if let Some(filename) = filename {
+            lines.push(filename);
+        }
+        lines.push(if can_open {
+            "preview: URI can be opened by the WebView once a GLB/WebGL adapter is wired"
+                .to_string()
+        } else {
+            "preview: project media must be hydrated before WebGL viewer handoff".to_string()
+        });
+        if requires_webgl {
+            lines.push("adapter: GLB/WebGL render adapter pending".to_string());
+        }
+        if requires_capture {
+            lines.push(
+                "capture: PNG snapshot adapter pending; no captured image emitted".to_string(),
+            );
+        }
+        return NodeInsight {
+            class: if requires_webgl || requires_capture {
+                "node-insight adapter"
+            } else {
+                "node-insight ready"
+            },
+            title: "GLB viewer plan".to_string(),
+            lines,
+        };
+    }
+
+    if let Some(error) = node
+        .data
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+    {
+        return NodeInsight {
+            class: "node-insight warn",
+            title: "GLB viewer plan".to_string(),
+            lines: vec![format!("planning failed: {}", truncate_chars(error, 120))],
+        };
+    }
+
+    NodeInsight {
+        class: "node-insight adapter",
+        title: "GLB viewer plan".to_string(),
+        lines: vec![
+            "Run Local to inspect GLB URI metadata.".to_string(),
+            "WebGL render and PNG capture still need a platform adapter.".to_string(),
+        ],
+    }
+}
+
 fn human_media_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -2240,7 +2332,7 @@ fn MediaPreviewCard(
                 }
             } else if preview.kind == MediaKind::Model3d {
                 div { class: "media-preview-placeholder",
-                    "3D model reference detected. GLB/WebGL preview adapter is still pending."
+                    "3D model reference detected. Use Open/Download for now; inline GLB/WebGL preview adapter is still pending."
                 }
             } else {
                 div { class: "media-preview-placeholder",
@@ -4619,6 +4711,53 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line.contains("no output image emitted"))
+        );
+    }
+
+    #[test]
+    fn node_card_insight_summarizes_glb_viewer_plan_without_fake_capture() {
+        let workflow = WorkflowFile {
+            name: "glb insight".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "viewer",
+                NodeType::GlbViewer,
+                Position { x: 0.0, y: 0.0 },
+                serde_json::json!({
+                    "glbUrl": "data:model/gltf-binary;base64,AAAA",
+                    "filename": "inline.glb"
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+        let result = gemed_executor::execute_simple_workflow(&workflow).expect("glb viewer plans");
+        let viewer = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "viewer")
+            .expect("viewer exists");
+
+        let insight = node_card_insight(viewer).expect("glb viewer insight exists");
+
+        assert_eq!(insight.title, "GLB viewer plan");
+        assert_eq!(insight.class, "node-insight adapter");
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("inlineData") && line.contains("model/gltf-binary"))
+        );
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("GLB/WebGL render adapter pending"))
+        );
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("no captured image emitted"))
         );
     }
 

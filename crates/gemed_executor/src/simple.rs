@@ -5,7 +5,7 @@ use crate::graph::{
 use gemed_core::{NodeStatus, NodeType, WorkflowFile, WorkflowNode, is_node_in_locked_group};
 use gemed_media::{
     InlineImageCompareResult, VideoFramePosition, compare_inline_images, inspect_inline_image,
-    plan_video_frame_grab, split_inline_image_grid,
+    plan_glb_viewer, plan_video_frame_grab, split_inline_image_grid,
 };
 use gemed_providers::{
     AudioRequest, ImageRequest, LlmRequest, Model3dRequest, ProviderError, ProviderId,
@@ -252,11 +252,10 @@ async fn execute_node(
         NodeType::GenerateAudio => execute_audio_generation(node, inputs, providers).await,
         NodeType::LlmGenerate => execute_llm_generation(node, inputs, providers).await,
         NodeType::VideoFrameGrab => execute_video_frame_grab(node, inputs),
-        NodeType::VideoStitch | NodeType::EaseCurve | NodeType::VideoTrim | NodeType::GlbViewer => {
-            NodeOutcome::skipped(
-                "Advanced media execution is not wired in this local simple executor yet.",
-            )
-        }
+        NodeType::GlbViewer => execute_glb_viewer(node, inputs),
+        NodeType::VideoStitch | NodeType::EaseCurve | NodeType::VideoTrim => NodeOutcome::skipped(
+            "Advanced media execution is not wired in this local simple executor yet.",
+        ),
         NodeType::Unknown => NodeOutcome::skipped("Unknown node type skipped."),
     }
 }
@@ -683,6 +682,63 @@ fn reset_video_frame_grab_outputs() -> IndexMap<String, Value> {
         ("outputImage".to_string(), Value::Null),
         ("outputImageRef".to_string(), Value::Null),
         ("frameGrabPlan".to_string(), Value::Null),
+    ])
+}
+
+fn execute_glb_viewer(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutcome {
+    let source_model = inputs
+        .model3d
+        .clone()
+        .or_else(|| string_field(&node.data, "glbUrl"))
+        .or_else(|| string_field(&node.data, "model3d"))
+        .or_else(|| string_field(&node.data, "output3dUrl"));
+    let Some(source_model) = source_model else {
+        return NodeOutcome::error(
+            "GLB viewer requires a connected 3D model or glbUrl/model3d field.".to_string(),
+            reset_glb_viewer_outputs(),
+        );
+    };
+    let filename = string_field(&node.data, "filename");
+
+    match plan_glb_viewer(&source_model, filename.as_deref()) {
+        Ok(plan) => {
+            let can_open_uri_directly = plan.can_open_uri_directly;
+            let mut updates = IndexMap::new();
+            updates.insert("glbUrl".to_string(), json!(source_model));
+            updates.insert("model3d".to_string(), Value::Null);
+            updates.insert(
+                "filename".to_string(),
+                filename.map(Value::from).unwrap_or(Value::Null),
+            );
+            updates.insert("capturedImage".to_string(), Value::Null);
+            updates.insert("capturedImageRef".to_string(), Value::Null);
+            updates.insert("glbViewerPlan".to_string(), json!(plan));
+            updates.insert("__mediaAdapter".to_string(), json!("rust-glb-viewer-plan"));
+
+            let message = if can_open_uri_directly {
+                "GLB viewer adapter boundary planned; WebGL render/capture remains platform adapter work."
+            } else {
+                "GLB viewer adapter boundary planned; project media must be hydrated before WebGL render/capture."
+            };
+            NodeOutcome::complete(message, updates)
+        }
+        Err(err) => NodeOutcome::error(format!("GLB viewer planning failed: {err}"), {
+            let mut updates = reset_glb_viewer_outputs();
+            updates.insert("glbUrl".to_string(), json!(source_model));
+            updates.insert(
+                "__mediaAdapter".to_string(),
+                json!("rust-glb-viewer-plan-unavailable"),
+            );
+            updates
+        }),
+    }
+}
+
+fn reset_glb_viewer_outputs() -> IndexMap<String, Value> {
+    IndexMap::from([
+        ("capturedImage".to_string(), Value::Null),
+        ("capturedImageRef".to_string(), Value::Null),
+        ("glbViewerPlan".to_string(), Value::Null),
     ])
 }
 
@@ -1565,6 +1621,126 @@ mod tests {
         );
         assert_eq!(result.report.error_count(), 0);
         assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn glb_viewer_records_adapter_plan_without_fake_capture_output() {
+        let source = "https://example.invalid/model.glb?download=1";
+        let workflow = WorkflowFile {
+            name: "glb viewer plan".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "viewer",
+                    NodeType::GlbViewer,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({
+                        "glbUrl": source,
+                        "filename": "model.glb",
+                        "capturedImage": "stale"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::with_handles(
+                "e1", "viewer", "output", "3d", "3d",
+            )],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("glb viewer plan executes");
+        let viewer = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "viewer")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        let plan = viewer
+            .data
+            .get("glbViewerPlan")
+            .expect("glb viewer plan is stored");
+
+        assert_eq!(
+            viewer.data.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            viewer.data.get("glbUrl").and_then(Value::as_str),
+            Some(source)
+        );
+        assert!(viewer.data.get("capturedImage").is_some_and(Value::is_null));
+        assert_eq!(
+            viewer.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-glb-viewer-plan")
+        );
+        assert_eq!(
+            plan.get("source")
+                .and_then(|source| source.get("uriKind"))
+                .and_then(Value::as_str),
+            Some("http")
+        );
+        assert_eq!(
+            plan.get("requiresWebglAdapter").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            output.data.get("model3d").and_then(Value::as_str),
+            Some(source),
+            "GLB viewer should route the model reference, not a fake capture"
+        );
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.skipped_count(), 0);
+    }
+
+    #[test]
+    fn glb_viewer_rejects_non_model_source() {
+        let workflow = WorkflowFile {
+            name: "bad glb viewer".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "viewer",
+                NodeType::GlbViewer,
+                Position { x: 0.0, y: 0.0 },
+                json!({
+                    "glbUrl": "data:image/png;base64,AAAA"
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+
+        let result = execute_simple_workflow(&workflow).expect("execution records node error");
+        let viewer = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "viewer")
+            .unwrap();
+
+        assert_eq!(
+            viewer.data.get("status").and_then(Value::as_str),
+            Some("error")
+        );
+        assert!(
+            viewer
+                .data
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("unsupported inline 3D model media type"))
+        );
+        assert_eq!(
+            viewer.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("rust-glb-viewer-plan-unavailable")
+        );
+        assert_eq!(result.report.error_count(), 1);
     }
 
     #[test]

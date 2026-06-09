@@ -317,11 +317,13 @@ fn source_output(
         NodeType::LlmGenerate => string_field(&source.data, "outputText").map(text_output),
         NodeType::Output => string_field(&source.data, "text").map(text_output),
         NodeType::SplitGrid => split_grid_output(source, source_handle).map(image_output),
+        NodeType::GlbViewer => string_field(&source.data, "glbUrl")
+            .or_else(|| string_field(&source.data, "model3d"))
+            .map(model3d_output),
         NodeType::OutputGallery
         | NodeType::Router
         | NodeType::Switch
         | NodeType::ConditionalSwitch
-        | NodeType::GlbViewer
         | NodeType::Unknown => None,
     }
 }

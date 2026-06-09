@@ -21,6 +21,12 @@ pub enum MediaTransformError {
     UnsupportedVideoUri(String),
     #[error("unsupported inline video media type `{0}`")]
     UnsupportedVideoMime(String),
+    #[error(
+        "unsupported 3D model URI `{0}`; current GLB viewer adapter boundary accepts inline GLB/GLTF data URLs, blob/http(s) URLs, project media refs, or app-relative/static paths"
+    )]
+    UnsupportedModel3dUri(String),
+    #[error("unsupported inline 3D model media type `{0}`")]
+    UnsupportedModel3dMime(String),
     #[error("invalid data URL")]
     InvalidDataUrl,
     #[error("base64 image payload is invalid: {0}")]
@@ -137,6 +143,30 @@ pub struct VideoFrameGrabPlan {
     pub requires_decode_adapter: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Model3dUriMetadata {
+    pub uri_kind: MediaUriKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_length: Option<usize>,
+    pub renderable_in_webview: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlbViewerPlan {
+    pub source: Model3dUriMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub viewer_adapter: String,
+    pub requires_webgl_adapter: bool,
+    pub can_open_uri_directly: bool,
+    pub capture_output_mime: String,
+    pub requires_capture_adapter: bool,
+}
+
 pub fn passthrough_inline_image_data_url(value: &str) -> Result<String, MediaTransformError> {
     let (mime, bytes) = decode_inline_image_data_url(value)?;
     encode_image_data_url(&bytes, &mime)
@@ -219,6 +249,26 @@ pub fn plan_video_frame_grab(
     })
 }
 
+pub fn plan_glb_viewer(
+    value: &str,
+    filename: Option<&str>,
+) -> Result<GlbViewerPlan, MediaTransformError> {
+    let source = inspect_model3d_uri(value)?;
+    let can_open_uri_directly = source.renderable_in_webview;
+    Ok(GlbViewerPlan {
+        source,
+        filename: filename
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        viewer_adapter: "webgl-glb-viewer".to_string(),
+        requires_webgl_adapter: true,
+        can_open_uri_directly,
+        capture_output_mime: "image/png".to_string(),
+        requires_capture_adapter: true,
+    })
+}
+
 fn inspect_video_uri(value: &str) -> Result<VideoUriMetadata, MediaTransformError> {
     let uri = value.trim();
     if uri.is_empty() {
@@ -289,6 +339,80 @@ fn inspect_video_uri(value: &str) -> Result<VideoUriMetadata, MediaTransformErro
     }
 
     Err(MediaTransformError::UnsupportedVideoUri(truncate_middle(
+        uri, 72,
+    )))
+}
+
+fn inspect_model3d_uri(value: &str) -> Result<Model3dUriMetadata, MediaTransformError> {
+    let uri = value.trim();
+    if uri.is_empty() {
+        return Err(MediaTransformError::UnsupportedModel3dUri(
+            "<empty>".to_string(),
+        ));
+    }
+
+    if let Some(parts) = data_url_parts(uri) {
+        let mime = parts.mime.trim().to_ascii_lowercase();
+        if !is_model3d_mime(&mime) {
+            return Err(MediaTransformError::UnsupportedModel3dMime(
+                parts.mime.to_string(),
+            ));
+        }
+        let byte_length = if parts.is_base64 {
+            base64_decoded_len(parts.payload)
+        } else {
+            parts.payload.len()
+        };
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::InlineData,
+            mime: Some(mime),
+            byte_length: Some(byte_length),
+            renderable_in_webview: true,
+        });
+    }
+
+    if uri.starts_with("blob:") {
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::Blob,
+            mime: model3d_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::Http,
+            mime: model3d_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("gemed-media://") {
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::ProjectReference,
+            mime: model3d_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: false,
+        });
+    }
+    if uri.starts_with('/') {
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::StaticPath,
+            mime: model3d_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+    if uri.starts_with("./") || uri.starts_with("../") {
+        return Ok(Model3dUriMetadata {
+            uri_kind: MediaUriKind::RelativePath,
+            mime: model3d_mime_from_uri(uri),
+            byte_length: None,
+            renderable_in_webview: true,
+        });
+    }
+
+    Err(MediaTransformError::UnsupportedModel3dUri(truncate_middle(
         uri, 72,
     )))
 }
@@ -1245,6 +1369,23 @@ fn video_mime_from_uri(uri: &str) -> Option<String> {
     Some(mime.to_string())
 }
 
+fn model3d_mime_from_uri(uri: &str) -> Option<String> {
+    let extension = extension_from_uri(uri)?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
+fn is_model3d_mime(mime: &str) -> bool {
+    matches!(
+        mime.trim().to_ascii_lowercase().as_str(),
+        "model/gltf-binary" | "model/gltf+json" | "application/gltf+json"
+    )
+}
+
 fn extension_from_uri(uri: &str) -> Option<&str> {
     let path = uri
         .split(['?', '#'])
@@ -1409,6 +1550,46 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unsupported inline video media type")
+        );
+    }
+
+    #[test]
+    fn glb_viewer_plan_accepts_project_refs_without_claiming_render_adapter() {
+        let plan = plan_glb_viewer("gemed-media://media/demo-model.glb", Some("demo-model.glb"))
+            .expect("project GLB ref can be planned");
+
+        assert_eq!(plan.source.uri_kind, MediaUriKind::ProjectReference);
+        assert_eq!(plan.source.mime.as_deref(), Some("model/gltf-binary"));
+        assert!(!plan.source.renderable_in_webview);
+        assert_eq!(plan.filename.as_deref(), Some("demo-model.glb"));
+        assert_eq!(plan.viewer_adapter, "webgl-glb-viewer");
+        assert!(plan.requires_webgl_adapter);
+        assert!(!plan.can_open_uri_directly);
+        assert_eq!(plan.capture_output_mime, "image/png");
+        assert!(plan.requires_capture_adapter);
+    }
+
+    #[test]
+    fn glb_viewer_plan_accepts_inline_glb_metadata_without_decoding() {
+        let plan = plan_glb_viewer("data:model/gltf-binary;base64,AAAA", None)
+            .expect("inline GLB can be planned");
+
+        assert_eq!(plan.source.uri_kind, MediaUriKind::InlineData);
+        assert_eq!(plan.source.mime.as_deref(), Some("model/gltf-binary"));
+        assert_eq!(plan.source.byte_length, Some(3));
+        assert!(plan.source.renderable_in_webview);
+        assert!(plan.can_open_uri_directly);
+        assert!(plan.requires_webgl_adapter);
+    }
+
+    #[test]
+    fn glb_viewer_plan_rejects_non_model_data_urls() {
+        let err = plan_glb_viewer("data:image/png;base64,AAAA", None)
+            .expect_err("image data URL is not a 3D model");
+
+        assert!(
+            err.to_string()
+                .contains("unsupported inline 3D model media type")
         );
     }
 

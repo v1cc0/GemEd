@@ -77,6 +77,7 @@ pub fn target_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
         NodeType::VideoStitch => vec![handle("video-0", "video 1"), handle("video-1", "video 2")],
         NodeType::EaseCurve => vec![handle("video", "video"), handle("easeCurve", "ease curve")],
         NodeType::VideoTrim | NodeType::VideoFrameGrab => vec![handle("video", "video")],
+        NodeType::GlbViewer => vec![handle("3d", "3D")],
         NodeType::Switch | NodeType::Router => vec![
             handle("text", "text"),
             handle("image", "image"),
@@ -91,7 +92,6 @@ pub fn target_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
         | NodeType::AudioInput
         | NodeType::VideoInput
         | NodeType::SplitGrid
-        | NodeType::GlbViewer
         | NodeType::Unknown => vec![handle("text", "text")],
     }
 }
@@ -273,6 +273,28 @@ mod tests {
         let handles = target_handle_options(&node);
         let ids: Vec<&str> = handles.iter().map(|handle| handle.id.as_str()).collect();
         assert_eq!(ids, vec!["image"]);
+    }
+
+    #[test]
+    fn glb_viewer_accepts_and_outputs_3d_handles() {
+        let node = WorkflowNode::new(
+            "viewer",
+            NodeType::GlbViewer,
+            Position { x: 0.0, y: 0.0 },
+            json!({}),
+        );
+
+        let source_ids: Vec<String> = source_handle_options(&node)
+            .into_iter()
+            .map(|handle| handle.id)
+            .collect();
+        let target_ids: Vec<String> = target_handle_options(&node)
+            .into_iter()
+            .map(|handle| handle.id)
+            .collect();
+
+        assert_eq!(source_ids, vec!["3d".to_string()]);
+        assert_eq!(target_ids, vec!["3d".to_string()]);
     }
 
     #[test]
