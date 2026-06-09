@@ -32,6 +32,7 @@ Implemented now:
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
 - Web, Linux desktop, and Linux `.deb` bundle verification
+- Real Chromium web interaction smoke for Frame Sample `Capture`, local-first GLB preview, and GLB `Capture PNG`; see `docs/webview-interaction-smoke.md`
 - Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, app/bundle icon configuration, CI build/bundle matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
 
 Not implemented yet:
@@ -40,7 +41,7 @@ Not implemented yet:
 - Broader live Provider/API execution beyond the opt-in Gemini/OpenAI/Anthropic LLM desktop paths
 - Provider secret entry/storage, OS keychain persistence, and web backend/server-function execution
 - Broader video/audio/3D execution adapters beyond schema/mock/planning capability modeling; split-grid transforms hydrated inline image data URLs; video frame-grab and GLB snapshot capture still require renderable WebView/browser sources plus real browser/WebView interaction verification; unresolved/missing project refs remain non-fatal preview/storage gaps
-- Media storage polish: richer node-specific editor/player affordances, true browser/WebView validation for local-first GLB model-viewer bundling, stronger clipboard fallbacks, and broader media transform adapters
+- Media storage polish: richer node-specific editor/player affordances, native desktop WebView validation for local-first GLB model-viewer bundling, stronger clipboard fallbacks, and broader media transform adapters
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 
@@ -82,6 +83,8 @@ In the app, set Gemini, OpenAI, or Anthropic to the platform/env mode in Provide
 For deterministic offline provider verification, click `Provider Sample`, click `Mock Defaults` in Provider Settings, then click `Run Providers`. The three output nodes should receive mock text for `gemini`, `openai`, and `anthropic`. For opt-in live desktop LLM verification, launch with `--features desktop,providers-http`, set the same providers to `Env`, export the matching environment variables, optionally edit default model/base URL fields, and run the same sample. Provider config persists model/base URL labels only; raw API keys stay in the process environment.
 
 For a narrower opt-in live provider check outside the UI, use `docs/provider-live-smoke.md`. The smoke fixture calls the same Rust Gemini/OpenAI/Anthropic LLM HTTP backends and reports only provider/model/response previews, never secret values.
+
+For browser media interaction validation, use `docs/webview-interaction-smoke.md`. The current smoke clicks `Frame Sample` capture and `Media Sample` GLB `Capture PNG` in real Chromium while keeping Playwright outside the repo.
 
 For release-style build artifacts:
 
