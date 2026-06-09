@@ -81,6 +81,8 @@ In the app, set Gemini, OpenAI, or Anthropic to the platform/env mode in Provide
 
 For deterministic offline provider verification, click `Provider Sample`, click `Mock Defaults` in Provider Settings, then click `Run Providers`. The three output nodes should receive mock text for `gemini`, `openai`, and `anthropic`. For opt-in live desktop LLM verification, launch with `--features desktop,providers-http`, set the same providers to `Env`, export the matching environment variables, optionally edit default model/base URL fields, and run the same sample. Provider config persists model/base URL labels only; raw API keys stay in the process environment.
 
+For a narrower opt-in live provider check outside the UI, use `docs/provider-live-smoke.md`. The smoke fixture calls the same Rust Gemini/OpenAI/Anthropic LLM HTTP backends and reports only provider/model/response previews, never secret values.
+
 For release-style build artifacts:
 
 ```bash
