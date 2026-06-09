@@ -96,4 +96,4 @@ Then launch the built app or `dx serve --desktop --features desktop` and verify:
 
 ## Current status
 
-Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. Windows is still a foundation target rather than full interactive verification until a local Windows machine or Windows UI runner launches the app and completes the WebView2 smoke checklist above. Linux desktop, Linux `.deb` bundle, web build, and Chromium web interaction smoke are verified by the normal development loop and CI.
+Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. Windows is still a foundation target rather than full interactive verification until a local Windows machine or Windows UI runner launches the app and completes the WebView2 smoke checklist above. Linux desktop builds, Linux `.deb` bundle, web build, Chromium web interaction smoke, and native Linux WebKitGTK Frame/GLB adapter self-smoke are verified; the Linux self-smoke does not prove Windows WebView2 behavior.

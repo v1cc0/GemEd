@@ -11,6 +11,8 @@ use gemed_core::{
     selected_node_ids, set_group_size, set_node_position, source_handle_options,
     split_grid_child_sets, target_handle_options, toggle_group_lock, toggle_node_selection,
 };
+#[cfg(feature = "desktop")]
+use gemed_executor::execute_simple_workflow_async;
 use gemed_executor::{
     ExecutionControl, SimpleExecutionReport,
     execute_simple_workflow_with_control_and_progress_async,
@@ -39,6 +41,8 @@ const GROUP_SELECTION_MIN_SIZE: f64 = 18.0;
 const MODEL_VIEWER_LOCAL_MODULE_URL: &str = "/vendor/model-viewer/4.3.1/model-viewer.min.js";
 const MODEL_VIEWER_CDN_MODULE_URL: &str =
     "https://unpkg.com/@google/model-viewer@4.3.1/dist/model-viewer.min.js";
+#[cfg(feature = "desktop")]
+const DESKTOP_SELF_SMOKE_ENV: &str = "GEMED_DESKTOP_SELF_SMOKE";
 
 const APP_CSS: &str = r#"
 :root {
@@ -243,12 +247,75 @@ pub fn App() -> Element {
         style { "{APP_CSS}" }
         div { class: "app",
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft, provider_config, active_execution }
+            DesktopSelfSmoke { workflow, json_text, message, execution_report }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config, active_execution }
                 WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft, media_overlay }
             }
             MediaOverlayLayer { media_overlay }
         }
+    }
+}
+
+#[component]
+fn DesktopSelfSmoke(
+    workflow: Signal<WorkflowFile>,
+    json_text: Signal<String>,
+    message: Signal<Message>,
+    execution_report: Signal<Option<SimpleExecutionReport>>,
+) -> Element {
+    #[cfg(feature = "desktop")]
+    {
+        let enabled = desktop_self_smoke_enabled();
+        let mut workflow = workflow;
+        let mut json_text = json_text;
+        let mut message = message;
+        let mut execution_report = execution_report;
+        use_future(move || async move {
+            if !enabled {
+                return;
+            }
+
+            message.set(Message::ok(
+                "Desktop WebView self-smoke is running Frame and GLB capture adapters.",
+            ));
+            println!(
+                "[gemed-desktop-self-smoke] START env={DESKTOP_SELF_SMOKE_ENV}=1 target=desktop-webview"
+            );
+
+            match run_desktop_webview_self_smoke().await {
+                Ok(report) => {
+                    workflow.set(report.final_workflow);
+                    json_text.set(report.final_json);
+                    execution_report.set(None);
+                    message.set(Message::ok(report.summary.clone()));
+                    println!("[gemed-desktop-self-smoke] PASS {}", report.summary);
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    message.set(Message::err(format!(
+                        "Desktop WebView self-smoke failed: {err}"
+                    )));
+                    eprintln!("[gemed-desktop-self-smoke] FAIL {err}");
+                    std::process::exit(1);
+                }
+            }
+        });
+
+        rsx! {
+            if enabled {
+                div {
+                    class: "message ok",
+                    style: "position: fixed; right: 1rem; bottom: 1rem; z-index: 60; max-width: 32rem;",
+                    "Desktop WebView self-smoke running; process will exit with PASS/FAIL."
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = (&workflow, &json_text, &message, &execution_report);
+        rsx! {}
     }
 }
 
@@ -3295,6 +3362,96 @@ fn glb_capture_success_from_eval_value(value: &Value) -> Result<GlbCaptureSucces
         width: value.get("width").and_then(Value::as_u64),
         height: value.get("height").and_then(Value::as_u64),
     })
+}
+
+#[cfg(feature = "desktop")]
+fn desktop_self_smoke_enabled() -> bool {
+    std::env::var(DESKTOP_SELF_SMOKE_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone)]
+struct DesktopWebviewSelfSmokeReport {
+    final_workflow: WorkflowFile,
+    final_json: String,
+    summary: String,
+}
+
+#[cfg(feature = "desktop")]
+async fn run_desktop_webview_self_smoke() -> Result<DesktopWebviewSelfSmokeReport, String> {
+    let mut frame_workflow =
+        execute_simple_workflow_async(&WorkflowFile::video_frame_grab_example())
+            .await
+            .map_err(|err| format!("Frame Sample Run Local planning failed: {err}"))?
+            .workflow;
+    let frame_node = frame_workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "frame_grab")
+        .ok_or_else(|| "Frame Sample is missing `frame_grab`.".to_string())?;
+    let frame_request = video_frame_capture_request("frame_grab".to_string(), frame_node)
+        .map_err(|err| format!("Frame capture request rejected: {err}"))?;
+    let frame_value = document::eval(&video_frame_capture_script(&frame_request))
+        .await
+        .map_err(|err| format!("Frame capture eval failed: {err}"))?;
+    let frame_success = video_frame_capture_success_from_eval_value(&frame_value)
+        .map_err(|err| format!("Frame capture adapter failed: {err}"))?;
+    let frame_routes =
+        apply_video_frame_capture_success(&mut frame_workflow, "frame_grab", &frame_success)
+            .map_err(|err| format!("Frame capture routing failed: {err}"))?;
+    if frame_routes == 0 {
+        return Err("Frame capture did not route to any downstream output node.".to_string());
+    }
+
+    let mut glb_workflow = execute_simple_workflow_async(&WorkflowFile::media_preview_example())
+        .await
+        .map_err(|err| format!("Media Sample Run Local planning failed: {err}"))?
+        .workflow;
+    let glb_node = glb_workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == "media_glb")
+        .ok_or_else(|| "Media Sample is missing `media_glb`.".to_string())?;
+    let glb_request = glb_capture_request("media_glb".to_string(), glb_node)
+        .map_err(|err| format!("GLB capture request rejected: {err}"))?;
+    let glb_value = document::eval(&glb_capture_script(&glb_request))
+        .await
+        .map_err(|err| format!("GLB capture eval failed: {err}"))?;
+    let glb_success = glb_capture_success_from_eval_value(&glb_value)
+        .map_err(|err| format!("GLB capture adapter failed: {err}"))?;
+    let glb_routes = apply_glb_capture_success(&mut glb_workflow, "media_glb", &glb_success)
+        .map_err(|err| format!("GLB capture routing failed: {err}"))?;
+
+    let final_json = glb_workflow
+        .to_pretty_json()
+        .map_err(|err| format!("Final smoke workflow export failed: {err}"))?;
+    let frame_size = capture_size_label(frame_success.width, frame_success.height);
+    let glb_size = capture_size_label(glb_success.width, glb_success.height);
+    let summary = format!(
+        "Frame Sample capture PASS{frame_size}, routed {frame_routes}; Media Sample GLB capture PASS{glb_size}, routed {glb_routes}."
+    );
+
+    Ok(DesktopWebviewSelfSmokeReport {
+        final_workflow: glb_workflow,
+        final_json,
+        summary,
+    })
+}
+
+#[cfg(feature = "desktop")]
+fn capture_size_label(width: Option<u64>, height: Option<u64>) -> String {
+    match (width, height) {
+        (Some(width), Some(height)) => format!(" {width}×{height}"),
+        _ => String::new(),
+    }
 }
 
 async fn capture_glb_snapshot_with_webview_adapter(

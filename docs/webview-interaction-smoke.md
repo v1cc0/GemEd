@@ -1,10 +1,13 @@
-# Web/browser media interaction smoke
+# WebView and browser media interaction smoke
 
-This smoke verifies the Dioxus web target with real Chromium clicks. It covers the browser-side adapters used by the current Frame Sample and GLB viewer flows without adding Playwright or npm metadata to the repo.
+This document records two adapter smokes:
 
-It does **not** replace Linux desktop WebView or Windows WebView2 evidence. Use it as the reproducible web/browser check before doing native desktop runner validation.
+- Web target: real Chromium clicks against `dx serve --web`, with Playwright kept outside the repo.
+- Linux desktop target: a native Dioxus Desktop/WebKitGTK self-smoke triggered by `GEMED_DESKTOP_SELF_SMOKE=1`.
 
-## Start the deterministic web server
+These checks cover the browser/WebView adapters used by the current Frame Sample and GLB viewer flows. They do **not** replace Windows WebView2 evidence; Windows still needs a Windows machine or UI runner to launch and click the app.
+
+## Web target: start the deterministic server
 
 Use the hot-patch-free command recorded in `INCIDENTS.md`:
 
@@ -22,7 +25,7 @@ rtk curl -I http://127.0.0.1:4563/vendor/model-viewer/4.3.1/model-viewer.min.js
 Both should return `HTTP/1.1 200 OK`.
 
 
-## CI smoke
+## Web target: CI smoke
 
 `.github/workflows/ci.yml` includes a `Web interaction smoke` job that runs the same browser-side contract in CI without committing Playwright metadata to the repo:
 
@@ -33,9 +36,9 @@ Both should return `HTTP/1.1 200 OK`.
 5. Clicks runnable execution paths in Chromium: starter `Run Local`, mock `Run Providers`, Frame Sample `Capture`, and Media Sample GLB `Capture PNG`.
 6. Uploads the Dioxus server log and any Playwright evidence as the `gemed-web-interaction-smoke` artifact.
 
-This CI job is web/Chromium evidence only. Native Linux desktop WebView and Windows WebView2 click evidence still require native desktop runs.
+This CI job is web/Chromium evidence only. Native Linux desktop WebView evidence is covered separately by the self-smoke below; Windows WebView2 click evidence still requires a Windows desktop run.
 
-## Run isolated Playwright smoke
+## Web target: run isolated Playwright smoke
 
 Create the temporary harness outside the repo so the legacy Next.js `package.json` and lockfile stay untouched:
 
@@ -114,7 +117,7 @@ Expected result:
 4 passed
 ```
 
-## Current local evidence
+## Web target: current local evidence
 
 On 2026-06-09, from this repo state:
 
@@ -137,3 +140,38 @@ Stop the Dioxus server by explicit PID after the smoke:
 rtk pgrep -af "dx serve.*4563"
 rtk kill <pid>
 ```
+
+
+## Linux desktop target: WebKitGTK self-smoke
+
+For native Linux desktop WebView validation, run the app binary with the explicit self-smoke environment variable:
+
+```bash
+rtk timeout 180s env GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop
+```
+
+The normal app does not run this path. With `GEMED_DESKTOP_SELF_SMOKE=1`, the Dioxus Desktop app launches through the real system WebKitGTK WebView, then performs the same adapter boundary work that the UI buttons perform:
+
+1. Builds `Frame Sample`, runs the Rust local executor to record `frameGrabPlan`, evaluates the WebView video/canvas capture script, verifies a PNG data URL, and routes it to the downstream output node.
+2. Builds `Media Sample`, runs the Rust local executor to record `glbViewerPlan`, evaluates the WebView `model-viewer` snapshot script with the vendored model-viewer module fallback chain, and verifies a PNG data URL.
+3. Prints a `PASS` or `FAIL` line and exits with the matching process status.
+
+Expected decisive output:
+
+```text
+[gemed-desktop-self-smoke] START env=GEMED_DESKTOP_SELF_SMOKE=1 target=desktop-webview
+[gemed-desktop-self-smoke] PASS Frame Sample capture PASS 16×16, routed 1; Media Sample GLB capture PASS 640×480, routed 0.
+```
+
+This is native Linux WebKitGTK evidence, not Windows WebView2 evidence. It also intentionally bypasses external Wayland/X11 click automation: on native Wayland compositors, `xdotool` may not see WebKitGTK windows at all, while the self-smoke still exercises the real WebView JavaScript/runtime boundary.
+
+### Current Linux desktop evidence
+
+On 2026-06-09, from this repo state:
+
+- Environment: Wayland/Niri session with `DISPLAY=:0`, `WAYLAND_DISPLAY=wayland-1`, `XDG_SESSION_TYPE=wayland`.
+- `rtk dx serve --desktop --features desktop` launched a native `gemed-*` app process and WebKitGTK `WebKitNetworkProcess` / `WebKitWebProcess`; Niri reported a real `GemEd` window with app ID `gemed-5175b724`.
+- `xdotool search --name GemEd` did not see the native Wayland window, so external click automation was not reliable evidence on this host.
+- `rtk timeout 180s env GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop` exited `0` with:
+  - `Frame Sample capture PASS 16×16, routed 1`
+  - `Media Sample GLB capture PASS 640×480, routed 0`

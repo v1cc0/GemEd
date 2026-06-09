@@ -32,9 +32,10 @@ Implemented now:
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
-- Web, Linux desktop, and Linux `.deb` bundle verification
+- Web, Linux desktop, Linux native WebKitGTK self-smoke, and Linux `.deb` bundle verification
 - Rust release-smoke coverage for opening a built-in example, creating/connecting a workflow, save/load through storage, running a no-provider workflow, and running the mock provider sample
 - Real Chromium web interaction smoke for Run Local progress, mock Run Providers outputs, Frame Sample `Capture`, local-first GLB preview, and GLB `Capture PNG`; see `docs/webview-interaction-smoke.md`
+- Native Linux Dioxus Desktop/WebKitGTK self-smoke for Frame Sample PNG capture and Media Sample GLB PNG capture through the real WebView adapter boundary; see `docs/webview-interaction-smoke.md`
 - Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, app/bundle icon configuration, and real `windows-latest` CI evidence for desktop build, `providers-http` build, and `.msi` bundle; see `docs/windows-desktop-verification.md`
 
 Not implemented yet:
@@ -42,7 +43,7 @@ Not implemented yet:
 - Full editable canvas UX: polished drag/handle affordances
 - Broader live Provider/API execution beyond the opt-in Gemini/OpenAI/Anthropic LLM desktop paths
 - Provider secret entry/storage, OS keychain persistence, and web backend/server-function execution
-- Broader video/audio/3D execution adapters beyond schema/mock/planning capability modeling; split-grid transforms hydrated inline image data URLs; video frame-grab and GLB snapshot capture still require renderable WebView/browser sources plus real browser/WebView interaction verification; unresolved/missing project refs remain non-fatal preview/storage gaps
+- Broader video/audio/3D execution adapters beyond schema/mock/planning capability modeling; split-grid transforms hydrated inline image data URLs; video frame-grab and GLB snapshot capture still require renderable WebView/browser sources, and Windows WebView2 interaction remains unverified; unresolved/missing project refs remain non-fatal preview/storage gaps
 - Media storage polish: richer node-specific editor/player affordances, native desktop WebView validation for local-first GLB model-viewer bundling, stronger clipboard fallbacks, and broader media transform adapters
 - Native Windows WebView2 launch/click smoke for the bundled app; CI currently proves Windows build and `.msi` packaging, not interactive Windows UI behavior
 
@@ -87,7 +88,7 @@ For deterministic offline provider verification, click `Provider Sample`, click 
 
 For a narrower opt-in live provider check outside the UI, use `docs/provider-live-smoke.md`. The smoke fixture calls the same Rust Gemini/OpenAI/Anthropic LLM HTTP backends and reports only provider/model/response previews, never secret values.
 
-For browser interaction validation, use `docs/webview-interaction-smoke.md`. The current smoke clicks starter `Run Local`, mock `Run Providers`, `Frame Sample` capture, and `Media Sample` GLB `Capture PNG` in real Chromium while keeping Playwright outside the repo.
+For browser/native WebView adapter validation, use `docs/webview-interaction-smoke.md`. The web smoke clicks starter `Run Local`, mock `Run Providers`, `Frame Sample` capture, and `Media Sample` GLB `Capture PNG` in real Chromium while keeping Playwright outside the repo. The Linux desktop self-smoke runs the Frame and GLB capture adapters inside the real Dioxus Desktop/WebKitGTK WebView with `GEMED_DESKTOP_SELF_SMOKE=1`.
 
 For release-style build artifacts:
 
@@ -117,7 +118,7 @@ cargo clippy --workspace --all-targets --no-default-features --features web -- -
 cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 ```
 
-CI mirrors these gates, runs the web interaction smoke in Chromium, and runs a manually triggerable Dioxus matrix for web build, Linux/Windows desktop builds including `providers-http`, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`.
+CI mirrors these gates, runs the web interaction smoke in Chromium, and runs a manually triggerable Dioxus matrix for web build, Linux/Windows desktop builds including `providers-http`, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`. Local native Linux WebKitGTK adapter validation is available with `GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop`.
 
 ## Notes
 
