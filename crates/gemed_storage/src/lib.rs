@@ -824,10 +824,16 @@ pub mod desktop {
             return Ok(None);
         };
         let path = safe_project_child(root, relative)?;
-        let bytes = std::fs::read(&path).map_err(|source| StorageError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(StorageError::Io {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        };
         let mime = mime_from_path(&path);
         let encoded = general_purpose::STANDARD.encode(bytes);
         Ok(Some(format!("data:{mime};base64,{encoded}")))
@@ -1472,6 +1478,88 @@ mod tests {
         let loaded = project.load().expect("load project media");
         assert_eq!(loaded.workflow.nodes[0].data["image"], media);
         assert_eq!(loaded.workflow.nodes[0].data["nested"]["duplicate"], media);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_preserves_missing_project_media_refs_on_load() {
+        let missing_ref = "gemed-media://media/missing-preview.png";
+        let mut workflow = WorkflowFile::blank();
+        workflow.name = "missing project ref".to_string();
+        workflow.nodes.push(WorkflowNode::new(
+            "image",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "image": null,
+                "imageRef": missing_ref
+            }),
+        ));
+        let root = unique_temp_dir("gemed-project-missing-ref-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        project
+            .save(&workflow)
+            .expect("save project with missing ref");
+        let loaded = project.load().expect("missing project ref is non-fatal");
+
+        assert_eq!(
+            loaded.workflow.nodes[0].data["image"],
+            serde_json::Value::Null
+        );
+        assert_eq!(loaded.workflow.nodes[0].data["imageRef"], missing_ref);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_project_bundle_round_trips_media_sample_with_placeholder_refs() {
+        let workflow = WorkflowFile::media_preview_example();
+        let root = unique_temp_dir("gemed-project-media-sample-test");
+        let project = desktop::DesktopWorkflowProject::at_dir(&root);
+
+        let snapshot = project.save(&workflow).expect("save media sample project");
+
+        assert_eq!(snapshot.manifest.media_files.len(), 3);
+        for media_file in &snapshot.manifest.media_files {
+            assert!(root.join(media_file).is_file());
+        }
+        let saved_json = std::fs::read_to_string(root.join(PROJECT_WORKFLOW_FILE)).unwrap();
+        assert!(!saved_json.contains("data:image/svg+xml"));
+        assert!(!saved_json.contains("data:audio/wav"));
+        assert!(!saved_json.contains("data:video/mp4"));
+        assert!(saved_json.contains("gemed-media://media/external-preview.png"));
+        assert!(saved_json.contains("gemed-media://media/demo-model.glb"));
+
+        let loaded = project.load().expect("load media sample project");
+        assert_eq!(loaded.workflow.name, workflow.name);
+        assert_eq!(
+            loaded.workflow.nodes[0].data["image"],
+            workflow.nodes[0].data["image"]
+        );
+        assert_eq!(
+            loaded.workflow.nodes[1].data["audioFile"],
+            workflow.nodes[1].data["audioFile"]
+        );
+        assert_eq!(
+            loaded.workflow.nodes[2].data["video"],
+            workflow.nodes[2].data["video"]
+        );
+        assert_eq!(
+            loaded.workflow.nodes[3].data["images"][0],
+            serde_json::Value::String(String::new())
+        );
+        assert_eq!(
+            loaded.workflow.nodes[3].data["imageRefs"][0],
+            "gemed-media://media/external-preview.png"
+        );
+        assert_eq!(
+            loaded.workflow.nodes[4].data["glbUrl"],
+            "gemed-media://media/demo-model.glb"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
