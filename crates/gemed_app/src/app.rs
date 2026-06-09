@@ -2098,6 +2098,7 @@ fn NodeCard(
     rsx! {
         article {
             class: "{node_class}",
+            "data-node-id": "{node.id}",
             style: "{style}",
             onmousedown: move |event: MouseEvent| {
                 event.stop_propagation();

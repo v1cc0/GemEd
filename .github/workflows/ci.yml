@@ -134,10 +134,11 @@ jobs:
             await page.goto(baseUrl);
             await page.getByRole('button', { name: 'Frame Sample' }).click();
             await page.getByRole('button', { name: 'Run Local' }).click();
-            await page.locator('article', { hasText: 'frame_grab' }).click({ position: { x: 80, y: 20 } });
+            const frameGrabNode = page.locator('article[data-node-id="frame_grab"]');
+            await frameGrabNode.click({ position: { x: 80, y: 20 } });
             await page.getByRole('button', { name: 'Capture', exact: true }).click();
             await expect(page.getByText(/Captured frame for `frame_grab`/)).toBeVisible({ timeout: 45000 });
-            await expect(page.locator('article', { hasText: 'frame_grab' }).getByText(/webview-video-canvas emitted PNG output/)).toBeVisible();
+            await expect(frameGrabNode.getByText(/webview-video-canvas emitted PNG output/)).toBeVisible();
           });
 
           test('GLB Capture PNG button emits a PNG in Chromium', async ({ page }) => {
@@ -145,10 +146,11 @@ jobs:
             await page.goto(baseUrl);
             await page.getByRole('button', { name: 'Media Sample' }).click();
             await page.getByRole('button', { name: 'Run Local' }).click();
-            await page.locator('article', { hasText: 'media_glb' }).click({ position: { x: 80, y: 20 } });
+            const glbNode = page.locator('article[data-node-id="media_glb"]');
+            await glbNode.click({ position: { x: 80, y: 20 } });
             await page.getByRole('button', { name: 'Capture PNG' }).click();
             await expect(page.getByText(/Captured GLB snapshot for `media_glb`/)).toBeVisible({ timeout: 75000 });
-            await expect(page.locator('article', { hasText: 'media_glb' }).getByText(/webview-model-viewer emitted PNG snapshot/)).toBeVisible();
+            await expect(glbNode.getByText(/webview-model-viewer emitted PNG snapshot/)).toBeVisible();
           });
           EOF
 
