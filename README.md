@@ -24,7 +24,7 @@ Implemented now:
 - Provider secret setup/status hints that tell users which desktop environment variable or web backend binding to configure without writing API keys into workflow/provider JSON
 - Fake-transport coverage for the opt-in OpenAI LLM backend so request mapping, authorization header construction, response parsing, and transport errors are tested without real API calls
 - Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar
-- Node-card media preview foundation that detects common inline/reference media fields, renders size-guarded image/audio/video previews, exposes Open/Download links, supports an in-app image lightbox, and flags GLB/project-reference adapter gaps honestly
+- Node-card media preview foundation that detects common inline/reference media fields, renders size-guarded image/audio/video previews, exposes Open/Download links, supports an in-app image/audio/video media overlay, and flags GLB/project-reference adapter gaps honestly
 - Header action to load the built-in Media Sample and exercise the JSON import/export → node-card preview path without external provider calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs

@@ -127,14 +127,20 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .media-preview-actions { display: flex; gap: .35rem; padding: .42rem .48rem 0; }
 .media-preview-link { border: 1px solid rgba(125, 211, 252, .28); color: #dbeafe; background: rgba(14, 165, 233, .12); border-radius: .48rem; padding: .18rem .38rem; font-size: .68rem; text-decoration: none; cursor: pointer; }
 .media-preview-link:hover { background: rgba(14, 165, 233, .22); }
-.lightbox-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 2rem; background: rgba(2, 6, 23, .82); backdrop-filter: blur(12px); }
-.lightbox-panel { width: min(72rem, 94vw); max-height: 92vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; border: 1px solid rgba(148, 163, 184, .22); border-radius: 1.1rem; background: rgba(15, 23, 42, .96); box-shadow: 0 36px 90px rgba(0, 0, 0, .55); overflow: hidden; }
-.lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid rgba(148, 163, 184, .14); }
-.lightbox-title { font-weight: 800; color: #e5ecff; }
-.lightbox-image-wrap { min-height: 0; display: grid; place-items: center; padding: 1rem; background: #020617; overflow: auto; }
-.lightbox-image { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: .6rem; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
-.lightbox-meta { padding: .65rem 1rem .9rem; color: #9fb0cf; font-size: .75rem; overflow-wrap: anywhere; }
-.lightbox-actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
+.media-overlay-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 2rem; background: rgba(2, 6, 23, .82); backdrop-filter: blur(12px); }
+.media-overlay-panel { width: min(72rem, 94vw); max-height: 92vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; border: 1px solid rgba(148, 163, 184, .22); border-radius: 1.1rem; background: rgba(15, 23, 42, .96); box-shadow: 0 36px 90px rgba(0, 0, 0, .55); overflow: hidden; }
+.media-overlay-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid rgba(148, 163, 184, .14); }
+.media-overlay-title { display: flex; align-items: center; gap: .55rem; min-width: 0; font-weight: 800; color: #e5ecff; }
+.media-overlay-title span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-overlay-body { min-height: 0; display: grid; place-items: center; padding: 1rem; background: #020617; overflow: auto; }
+.media-overlay-image { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: .6rem; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
+.media-overlay-video { display: block; width: min(100%, 64rem); max-height: 70vh; border-radius: .6rem; background: #020617; box-shadow: 0 18px 56px rgba(0, 0, 0, .38); }
+.media-overlay-audio-shell { width: min(42rem, 100%); display: grid; gap: .8rem; justify-items: stretch; padding: 1.1rem; border-radius: .9rem; border: 1px solid rgba(148, 163, 184, .18); background: rgba(15, 23, 42, .72); }
+.media-overlay-audio-shell p { margin: 0; color: #bfdbfe; font-size: .84rem; text-align: center; }
+.media-overlay-audio { width: 100%; }
+.media-overlay-placeholder { min-height: 10rem; display: grid; place-items: center; padding: 1rem; color: #9fb0cf; text-align: center; }
+.media-overlay-meta { padding: .65rem 1rem .9rem; color: #9fb0cf; font-size: .75rem; overflow-wrap: anywhere; }
+.media-overlay-actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
 .handle-column { position: absolute; top: 3.25rem; bottom: .75rem; display: flex; flex-direction: column; justify-content: center; gap: .28rem; z-index: 4; pointer-events: auto; }
 .handle-column.target { left: -.55rem; align-items: flex-start; }
@@ -203,7 +209,7 @@ pub fn App() -> Element {
     let viewport = use_signal(CanvasViewport::default);
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
     let provider_config = use_signal(initial_provider_config);
-    let media_lightbox = use_signal(|| None::<MediaLightbox>);
+    let media_overlay = use_signal(|| None::<MediaOverlay>);
 
     rsx! {
         style { "{APP_CSS}" }
@@ -211,9 +217,9 @@ pub fn App() -> Element {
             Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft, provider_config }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config }
-                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft, media_lightbox }
+                WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft, media_overlay }
             }
-            MediaLightboxOverlay { media_lightbox }
+            MediaOverlayLayer { media_overlay }
         }
     }
 }
@@ -1226,7 +1232,7 @@ fn WorkflowCanvas(
     group_selection_state: Signal<Option<GroupSelectionState>>,
     viewport: Signal<CanvasViewport>,
     connection_draft: Signal<Option<ConnectionDraft>>,
-    media_lightbox: Signal<Option<MediaLightbox>>,
+    media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
     let wf = workflow.read();
     let viewport_snapshot = *viewport.read();
@@ -1419,7 +1425,7 @@ fn WorkflowCanvas(
                             drag_state,
                             viewport,
                             connection_draft,
-                            media_lightbox,
+                            media_overlay,
                         }
                     }
                 }
@@ -1585,7 +1591,7 @@ fn NodeCard(
     drag_state: Signal<Option<DragState>>,
     viewport: Signal<CanvasViewport>,
     connection_draft: Signal<Option<ConnectionDraft>>,
-    media_lightbox: Signal<Option<MediaLightbox>>,
+    media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
     let style = format!(
         "left: {}px; top: {}px;",
@@ -1722,7 +1728,7 @@ fn NodeCard(
                 if let Some(text) = preview {
                     p { "{text}" }
                 }
-                MediaPreviewStrip { previews: media_previews, media_lightbox }
+                MediaPreviewStrip { previews: media_previews, media_overlay }
                 div { class: "node-id", "{node.id}" }
             }
         }
@@ -1732,7 +1738,7 @@ fn NodeCard(
 #[component]
 fn MediaPreviewStrip(
     previews: Vec<MediaPreview>,
-    media_lightbox: Signal<Option<MediaLightbox>>,
+    media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
     let preview_count = previews.len();
     let extra_count = preview_count.saturating_sub(3);
@@ -1741,7 +1747,7 @@ fn MediaPreviewStrip(
         if preview_count > 0 {
             div { class: "media-preview-list",
                 for preview in previews.iter().take(3) {
-                    MediaPreviewCard { preview: preview.clone(), media_lightbox }
+                    MediaPreviewCard { preview: preview.clone(), media_overlay }
                 }
                 if extra_count > 0 {
                     div { class: "media-preview-placeholder",
@@ -1756,7 +1762,7 @@ fn MediaPreviewStrip(
 #[component]
 fn MediaPreviewCard(
     preview: MediaPreview,
-    mut media_lightbox: Signal<Option<MediaLightbox>>,
+    mut media_overlay: Signal<Option<MediaOverlay>>,
 ) -> Element {
     let label = preview.label.clone();
     let kind_label = preview.kind.label();
@@ -1767,7 +1773,7 @@ fn MediaPreviewCard(
     let renderable = preview.is_renderable_uri();
     let inline_preview = preview.should_inline_preview();
     let download_filename = preview.download_filename();
-    let lightbox = media_lightbox_from_preview(&preview);
+    let overlay = media_overlay_from_preview(&preview);
 
     rsx! {
         div {
@@ -1815,12 +1821,12 @@ fn MediaPreviewCard(
             }
             if renderable {
                 div { class: "media-preview-actions",
-                    if let Some(lightbox) = lightbox.clone() {
+                    if let Some(overlay) = overlay.clone() {
                         button {
                             class: "media-preview-link",
                             onclick: move |event: MouseEvent| {
                                 event.stop_propagation();
-                                media_lightbox.set(Some(lightbox.clone()));
+                                media_overlay.set(Some(overlay.clone()));
                             },
                             "Preview"
                         }
@@ -1854,27 +1860,30 @@ fn MediaPreviewCard(
 }
 
 #[component]
-fn MediaLightboxOverlay(mut media_lightbox: Signal<Option<MediaLightbox>>) -> Element {
-    let snapshot = media_lightbox.read().clone();
+fn MediaOverlayLayer(mut media_overlay: Signal<Option<MediaOverlay>>) -> Element {
+    let snapshot = media_overlay.read().clone();
 
     rsx! {
-        if let Some(lightbox) = snapshot {
+        if let Some(overlay) = snapshot {
             div {
-                class: "lightbox-backdrop",
+                class: "media-overlay-backdrop",
                 onclick: move |_| {
-                    media_lightbox.set(None);
+                    media_overlay.set(None);
                 },
                 div {
-                    class: "lightbox-panel",
+                    class: "media-overlay-panel",
                     onclick: move |event: MouseEvent| {
                         event.stop_propagation();
                     },
-                    div { class: "lightbox-head",
-                        div { class: "lightbox-title", "{lightbox.label}" }
-                        div { class: "lightbox-actions",
+                    div { class: "media-overlay-head",
+                        div { class: "media-overlay-title",
+                            span { "{overlay.label}" }
+                            span { class: "{media_preview_kind_class(overlay.kind)}", "{overlay.kind.label()}" }
+                        }
+                        div { class: "media-overlay-actions",
                             a {
                                 class: "media-preview-link",
-                                href: "{lightbox.uri}",
+                                href: "{overlay.uri}",
                                 target: "_blank",
                                 rel: "noopener noreferrer",
                                 onclick: move |event: MouseEvent| {
@@ -1884,8 +1893,8 @@ fn MediaLightboxOverlay(mut media_lightbox: Signal<Option<MediaLightbox>>) -> El
                             }
                             a {
                                 class: "media-preview-link",
-                                href: "{lightbox.uri}",
-                                download: "{lightbox.download_filename}",
+                                href: "{overlay.uri}",
+                                download: "{overlay.download_filename}",
                                 onclick: move |event: MouseEvent| {
                                     event.stop_propagation();
                                 },
@@ -1895,21 +1904,44 @@ fn MediaLightboxOverlay(mut media_lightbox: Signal<Option<MediaLightbox>>) -> El
                                 class: "media-preview-link",
                                 onclick: move |event: MouseEvent| {
                                     event.stop_propagation();
-                                    media_lightbox.set(None);
+                                    media_overlay.set(None);
                                 },
                                 "Close"
                             }
                         }
                     }
-                    div { class: "lightbox-image-wrap",
-                        img {
-                            class: "lightbox-image",
-                            src: "{lightbox.uri}",
-                            alt: "{lightbox.label}",
+                    div { class: "media-overlay-body",
+                        if overlay.kind == MediaKind::Image {
+                            img {
+                                class: "media-overlay-image",
+                                src: "{overlay.uri}",
+                                alt: "{overlay.label}",
+                            }
+                        } else if overlay.kind == MediaKind::Video {
+                            video {
+                                class: "media-overlay-video",
+                                src: "{overlay.uri}",
+                                controls: true,
+                                preload: "metadata",
+                            }
+                        } else if overlay.kind == MediaKind::Audio {
+                            div { class: "media-overlay-audio-shell",
+                                p { "Audio preview" }
+                                audio {
+                                    class: "media-overlay-audio",
+                                    src: "{overlay.uri}",
+                                    controls: true,
+                                    preload: "metadata",
+                                }
+                            }
+                        } else {
+                            div { class: "media-overlay-placeholder",
+                                "No inline overlay adapter is available for this media kind yet."
+                            }
                         }
                     }
-                    div { class: "lightbox-meta",
-                        "{lightbox.source_field} · {lightbox.uri_hint}"
+                    div { class: "media-overlay-meta",
+                        "{overlay.source_field} · {overlay.uri_hint}"
                     }
                 }
             }
@@ -1917,8 +1949,17 @@ fn MediaLightboxOverlay(mut media_lightbox: Signal<Option<MediaLightbox>>) -> El
     }
 }
 
-fn media_lightbox_from_preview(preview: &MediaPreview) -> Option<MediaLightbox> {
-    (preview.kind == MediaKind::Image && preview.should_inline_preview()).then(|| MediaLightbox {
+fn media_overlay_from_preview(preview: &MediaPreview) -> Option<MediaOverlay> {
+    if !matches!(
+        preview.kind,
+        MediaKind::Image | MediaKind::Audio | MediaKind::Video
+    ) || !preview.should_inline_preview()
+    {
+        return None;
+    }
+
+    Some(MediaOverlay {
+        kind: preview.kind,
         label: preview.label.clone(),
         uri: preview.uri.clone(),
         uri_hint: preview.uri_hint(),
@@ -3372,7 +3413,8 @@ struct ConnectionDraft {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct MediaLightbox {
+struct MediaOverlay {
+    kind: MediaKind,
     label: String,
     uri: String,
     uri_hint: String,
@@ -3383,12 +3425,12 @@ struct MediaLightbox {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, ensure_json_extension, media_lightbox_from_preview, media_preview_kind_class,
+        CanvasRect, ensure_json_extension, media_overlay_from_preview, media_preview_kind_class,
         node_ids_intersecting_rect, platform_provider_secret_setup_message,
         provider_capability_list, provider_secret_setup_hint, workflow_json_filename,
     };
     use gemed_core::{Position, WorkflowFile};
-    use gemed_media::{MediaKind, media_previews_for_node};
+    use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
     use std::path::PathBuf;
 
@@ -3496,7 +3538,7 @@ mod tests {
     }
 
     #[test]
-    fn media_lightbox_only_supports_inline_renderable_images() {
+    fn media_overlay_supports_inline_renderable_image_audio_video() {
         let workflow = WorkflowFile::media_preview_example();
         let image_preview = workflow
             .nodes
@@ -3510,12 +3552,54 @@ mod tests {
             .flat_map(media_previews_for_node)
             .find(|preview| preview.kind == MediaKind::Audio)
             .expect("media sample has audio");
+        let video_preview = workflow
+            .nodes
+            .iter()
+            .flat_map(media_previews_for_node)
+            .find(|preview| preview.kind == MediaKind::Video)
+            .expect("media sample has video");
 
-        let lightbox = media_lightbox_from_preview(&image_preview).expect("image has lightbox");
+        let image_overlay = media_overlay_from_preview(&image_preview).expect("image has overlay");
+        let audio_overlay = media_overlay_from_preview(&audio_preview).expect("audio has overlay");
+        let video_overlay = media_overlay_from_preview(&video_preview).expect("video has overlay");
 
-        assert_eq!(lightbox.label, "Inline SVG Image");
-        assert_eq!(lightbox.source_field, "image");
-        assert_eq!(lightbox.download_filename, "inline-svg-image.svg");
-        assert!(media_lightbox_from_preview(&audio_preview).is_none());
+        assert_eq!(image_overlay.kind, MediaKind::Image);
+        assert_eq!(image_overlay.label, "Inline SVG Image");
+        assert_eq!(image_overlay.source_field, "image");
+        assert_eq!(image_overlay.download_filename, "inline-svg-image.svg");
+
+        assert_eq!(audio_overlay.kind, MediaKind::Audio);
+        assert_eq!(audio_overlay.source_field, "audioFile");
+        assert_eq!(audio_overlay.download_filename, "inline-wav-audio.wav");
+
+        assert_eq!(video_overlay.kind, MediaKind::Video);
+        assert_eq!(video_overlay.source_field, "video");
+        assert_eq!(video_overlay.download_filename, "inline-mp4-video.mp4");
+    }
+
+    #[test]
+    fn media_overlay_excludes_adapter_refs_and_large_inline_payloads() {
+        let model_preview = MediaPreview {
+            kind: MediaKind::Model3d,
+            label: "Project GLB".to_string(),
+            uri: "https://example.test/demo.glb".to_string(),
+            source_field: "glbUrl".to_string(),
+        };
+        let project_ref_preview = MediaPreview {
+            kind: MediaKind::Image,
+            label: "Project Image".to_string(),
+            uri: "gemed-media://media/example.png".to_string(),
+            source_field: "imageRef".to_string(),
+        };
+        let large_inline_preview = MediaPreview {
+            kind: MediaKind::Image,
+            label: "Large Inline".to_string(),
+            uri: format!("data:image/png;base64,{}", "A".repeat(800 * 1024)),
+            source_field: "image".to_string(),
+        };
+
+        assert!(media_overlay_from_preview(&model_preview).is_none());
+        assert!(media_overlay_from_preview(&project_ref_preview).is_none());
+        assert!(media_overlay_from_preview(&large_inline_preview).is_none());
     }
 }
