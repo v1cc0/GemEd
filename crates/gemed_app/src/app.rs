@@ -14,7 +14,7 @@ use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
 };
-use gemed_media::workflow_media_summary;
+use gemed_media::{MediaKind, MediaPreview, media_previews_for_node, workflow_media_summary};
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
 use gemed_providers::OpenAiResponsesProvider;
 use gemed_providers::{
@@ -112,6 +112,18 @@ textarea.workflow-json:focus { border-color: rgba(96, 165, 250, .65); box-shadow
 .badge.error { color: #fecaca; border-color: rgba(248, 113, 113, .28); }
 .badge.loading { color: #bfdbfe; border-color: rgba(96, 165, 250, .32); }
 .node-body { padding: .8rem .85rem; color: #b9c6df; font-size: .82rem; line-height: 1.4; }
+.media-preview-list { display: flex; flex-direction: column; gap: .45rem; margin-top: .65rem; }
+.media-preview { border: 1px solid rgba(148, 163, 184, .14); border-radius: .75rem; overflow: hidden; background: rgba(2, 6, 23, .42); }
+.media-preview-head { display: flex; align-items: center; justify-content: space-between; gap: .4rem; padding: .36rem .48rem; color: #dbeafe; font-size: .68rem; font-weight: 750; }
+.media-preview-kind { border-radius: 999px; padding: .1rem .38rem; border: 1px solid rgba(148, 163, 184, .2); color: #b6c5e2; background: rgba(15, 23, 42, .76); text-transform: uppercase; letter-spacing: .04em; }
+.media-preview-kind.image { color: #bbf7d0; border-color: rgba(74, 222, 128, .24); }
+.media-preview-kind.audio { color: #bfdbfe; border-color: rgba(96, 165, 250, .28); }
+.media-preview-kind.video { color: #fbcfe8; border-color: rgba(244, 114, 182, .28); }
+.media-preview-kind.model3d { color: #ddd6fe; border-color: rgba(196, 181, 253, .28); }
+.media-preview img, .media-preview video { display: block; width: 100%; max-height: 8rem; object-fit: cover; background: #020617; }
+.media-preview audio { display: block; width: 100%; height: 2.2rem; padding: 0 .35rem .35rem; }
+.media-preview-placeholder { min-height: 3.2rem; display: grid; place-items: center; padding: .7rem; color: #9fb0cf; text-align: center; font-size: .72rem; overflow-wrap: anywhere; background: repeating-linear-gradient(135deg, rgba(148, 163, 184, .06) 0, rgba(148, 163, 184, .06) 8px, transparent 8px, transparent 16px); }
+.media-preview-hint { margin: 0; padding: .34rem .48rem .46rem; color: #8ea1c2; font-size: .68rem; overflow-wrap: anywhere; }
 .node-id { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .72rem; margin-top: .65rem; overflow-wrap: anywhere; }
 .handle-column { position: absolute; top: 3.25rem; bottom: .75rem; display: flex; flex-direction: column; justify-content: center; gap: .28rem; z-index: 4; pointer-events: auto; }
 .handle-column.target { left: -.55rem; align-items: flex-start; }
@@ -1560,6 +1572,7 @@ fn NodeCard(
     let node_class = classes.join(" ");
     let label = node.display_label();
     let preview = node.preview_text();
+    let media_previews = media_previews_for_node(&node);
     let node_id = node.id.clone();
     let source_handles = source_handle_options(&node);
     let target_handles = target_handle_options(&node);
@@ -1674,9 +1687,90 @@ fn NodeCard(
                 if let Some(text) = preview {
                     p { "{text}" }
                 }
+                MediaPreviewStrip { previews: media_previews }
                 div { class: "node-id", "{node.id}" }
             }
         }
+    }
+}
+
+#[component]
+fn MediaPreviewStrip(previews: Vec<MediaPreview>) -> Element {
+    let preview_count = previews.len();
+    let extra_count = preview_count.saturating_sub(3);
+
+    rsx! {
+        if preview_count > 0 {
+            div { class: "media-preview-list",
+                for preview in previews.iter().take(3) {
+                    MediaPreviewCard { preview: preview.clone() }
+                }
+                if extra_count > 0 {
+                    div { class: "media-preview-placeholder",
+                        "{extra_count} more media item(s) available in node data."
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MediaPreviewCard(preview: MediaPreview) -> Element {
+    let label = preview.label.clone();
+    let kind_label = preview.kind.label();
+    let kind_class = media_preview_kind_class(preview.kind);
+    let uri = preview.uri.clone();
+    let uri_hint = preview.uri_hint();
+    let source_field = preview.source_field.clone();
+    let renderable = preview.is_renderable_uri();
+
+    rsx! {
+        div { class: "media-preview",
+            div { class: "media-preview-head",
+                span { "{label}" }
+                span { class: "{kind_class}", "{kind_label}" }
+            }
+            if renderable && preview.kind == MediaKind::Image {
+                img {
+                    src: "{uri}",
+                    alt: "{label}",
+                    loading: "lazy",
+                }
+            } else if renderable && preview.kind == MediaKind::Video {
+                video {
+                    src: "{uri}",
+                    controls: true,
+                    preload: "metadata",
+                }
+            } else if renderable && preview.kind == MediaKind::Audio {
+                audio {
+                    src: "{uri}",
+                    controls: true,
+                    preload: "metadata",
+                }
+            } else if preview.kind == MediaKind::Model3d {
+                div { class: "media-preview-placeholder",
+                    "3D model reference detected. GLB/WebGL preview adapter is still pending."
+                }
+            } else {
+                div { class: "media-preview-placeholder",
+                    "Media reference detected, but this URI must be hydrated or handled by a platform adapter before inline preview."
+                }
+            }
+            p { class: "media-preview-hint",
+                "{source_field} · {uri_hint}"
+            }
+        }
+    }
+}
+
+fn media_preview_kind_class(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => "media-preview-kind image",
+        MediaKind::Audio => "media-preview-kind audio",
+        MediaKind::Video => "media-preview-kind video",
+        MediaKind::Model3d => "media-preview-kind model3d",
     }
 }
 
@@ -3118,11 +3212,12 @@ struct ConnectionDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, ensure_json_extension, node_ids_intersecting_rect,
+        CanvasRect, ensure_json_extension, media_preview_kind_class, node_ids_intersecting_rect,
         platform_provider_secret_setup_message, provider_capability_list,
         provider_secret_setup_hint, workflow_json_filename,
     };
     use gemed_core::{Position, WorkflowFile};
+    use gemed_media::MediaKind;
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
     use std::path::PathBuf;
 
@@ -3215,5 +3310,17 @@ mod tests {
         assert!(message.contains("OpenAI"));
         assert!(message.contains("OPENAI_API_KEY"));
         assert!(!message.contains("sk-live-secret"));
+    }
+
+    #[test]
+    fn media_preview_kind_class_is_stable_for_css() {
+        assert_eq!(
+            media_preview_kind_class(MediaKind::Image),
+            "media-preview-kind image"
+        );
+        assert_eq!(
+            media_preview_kind_class(MediaKind::Model3d),
+            "media-preview-kind model3d"
+        );
     }
 }

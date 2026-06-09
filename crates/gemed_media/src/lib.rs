@@ -1,5 +1,6 @@
-use gemed_core::{NodeType, WorkflowFile};
+use gemed_core::{NodeType, WorkflowFile, WorkflowNode};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +108,44 @@ pub struct WorkflowMediaSummary {
     pub profiles: Vec<MediaNodeProfile>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPreview {
+    pub kind: MediaKind,
+    pub label: String,
+    pub uri: String,
+    pub source_field: String,
+}
+
+impl MediaPreview {
+    pub fn is_renderable_uri(&self) -> bool {
+        let uri = self.uri.trim();
+        uri.starts_with("data:")
+            || uri.starts_with("blob:")
+            || uri.starts_with("http://")
+            || uri.starts_with("https://")
+            || uri.starts_with('/')
+            || uri.starts_with("./")
+            || uri.starts_with("../")
+    }
+
+    pub fn uri_hint(&self) -> String {
+        let uri = self.uri.trim();
+        if let Some(mime) = uri.strip_prefix("data:").and_then(|value| {
+            value
+                .split_once(';')
+                .map(|(mime, _)| mime)
+                .or_else(|| value.split_once(',').map(|(mime, _)| mime))
+        }) {
+            return format!("inline {mime}");
+        }
+        if uri.starts_with("gemed-media://") {
+            return "project media reference".to_string();
+        }
+        truncate_middle(uri, 72)
+    }
+}
+
 impl WorkflowMediaSummary {
     pub fn sentence(&self) -> String {
         if self.media_node_count == 0 {
@@ -155,6 +194,58 @@ pub fn workflow_media_summary(workflow: &WorkflowFile) -> WorkflowMediaSummary {
         preview_only_count,
         profiles,
     }
+}
+
+pub fn media_previews_for_node(node: &WorkflowNode) -> Vec<MediaPreview> {
+    let content_hint = content_type_hint(&node.data);
+    let mut previews = Vec::new();
+
+    for spec in SINGLE_MEDIA_FIELDS {
+        let inline = string_field(&node.data, spec.field);
+        let reference = spec
+            .ref_field
+            .and_then(|ref_field| string_field(&node.data, ref_field).map(|uri| (ref_field, uri)));
+        let Some((source_field, uri)) = inline.map(|uri| (spec.field, uri)).or(reference) else {
+            continue;
+        };
+        push_preview(
+            &mut previews,
+            spec,
+            source_field.to_string(),
+            uri,
+            content_hint,
+        );
+    }
+
+    for spec in ARRAY_MEDIA_FIELDS {
+        let inline_values = string_array_slots(&node.data, spec.field);
+        let reference_values = spec
+            .ref_field
+            .map(|ref_field| string_array_slots(&node.data, ref_field))
+            .unwrap_or_default();
+        let max_len = inline_values.len().max(reference_values.len());
+        for index in 0..max_len {
+            let inline = inline_values.get(index).cloned().flatten();
+            let reference = reference_values.get(index).cloned().flatten();
+            let Some((source_field, uri)) = inline
+                .map(|uri| (spec.field, uri))
+                .or_else(|| reference.map(|uri| (spec.ref_field.unwrap_or(spec.field), uri)))
+            else {
+                continue;
+            };
+            let label = format!("{} {}", spec.label, index + 1);
+            push_preview_with_label(
+                &mut previews,
+                spec,
+                label,
+                format!("{source_field}[{index}]"),
+                uri,
+                content_hint,
+            );
+        }
+    }
+
+    previews
 }
 
 pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProfile> {
@@ -298,6 +389,270 @@ fn profile(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MediaFieldSpec {
+    field: &'static str,
+    ref_field: Option<&'static str>,
+    kind: MediaKind,
+    label: &'static str,
+}
+
+const SINGLE_MEDIA_FIELDS: &[MediaFieldSpec] = &[
+    MediaFieldSpec {
+        field: "image",
+        ref_field: Some("imageRef"),
+        kind: MediaKind::Image,
+        label: "Image",
+    },
+    MediaFieldSpec {
+        field: "audio",
+        ref_field: None,
+        kind: MediaKind::Audio,
+        label: "Audio",
+    },
+    MediaFieldSpec {
+        field: "audioFile",
+        ref_field: Some("audioFileRef"),
+        kind: MediaKind::Audio,
+        label: "Audio file",
+    },
+    MediaFieldSpec {
+        field: "video",
+        ref_field: Some("videoRef"),
+        kind: MediaKind::Video,
+        label: "Video",
+    },
+    MediaFieldSpec {
+        field: "sourceImage",
+        ref_field: Some("sourceImageRef"),
+        kind: MediaKind::Image,
+        label: "Source image",
+    },
+    MediaFieldSpec {
+        field: "outputImage",
+        ref_field: Some("outputImageRef"),
+        kind: MediaKind::Image,
+        label: "Output image",
+    },
+    MediaFieldSpec {
+        field: "outputVideo",
+        ref_field: Some("outputVideoRef"),
+        kind: MediaKind::Video,
+        label: "Output video",
+    },
+    MediaFieldSpec {
+        field: "outputAudio",
+        ref_field: Some("outputAudioRef"),
+        kind: MediaKind::Audio,
+        label: "Output audio",
+    },
+    MediaFieldSpec {
+        field: "imageA",
+        ref_field: Some("imageARef"),
+        kind: MediaKind::Image,
+        label: "Image A",
+    },
+    MediaFieldSpec {
+        field: "imageB",
+        ref_field: Some("imageBRef"),
+        kind: MediaKind::Image,
+        label: "Image B",
+    },
+    MediaFieldSpec {
+        field: "capturedImage",
+        ref_field: Some("capturedImageRef"),
+        kind: MediaKind::Image,
+        label: "Captured image",
+    },
+    MediaFieldSpec {
+        field: "thumbnail",
+        ref_field: None,
+        kind: MediaKind::Image,
+        label: "Thumbnail",
+    },
+    MediaFieldSpec {
+        field: "output3dUrl",
+        ref_field: None,
+        kind: MediaKind::Model3d,
+        label: "3D model",
+    },
+    MediaFieldSpec {
+        field: "glbUrl",
+        ref_field: None,
+        kind: MediaKind::Model3d,
+        label: "GLB",
+    },
+    MediaFieldSpec {
+        field: "model3d",
+        ref_field: None,
+        kind: MediaKind::Model3d,
+        label: "3D model",
+    },
+];
+
+const ARRAY_MEDIA_FIELDS: &[MediaFieldSpec] = &[
+    MediaFieldSpec {
+        field: "inputImages",
+        ref_field: Some("inputImageRefs"),
+        kind: MediaKind::Image,
+        label: "Input image",
+    },
+    MediaFieldSpec {
+        field: "images",
+        ref_field: Some("imageRefs"),
+        kind: MediaKind::Image,
+        label: "Gallery image",
+    },
+    MediaFieldSpec {
+        field: "videos",
+        ref_field: Some("videoRefs"),
+        kind: MediaKind::Video,
+        label: "Gallery video",
+    },
+];
+
+fn push_preview(
+    previews: &mut Vec<MediaPreview>,
+    spec: &MediaFieldSpec,
+    source_field: String,
+    uri: String,
+    content_hint: Option<MediaKind>,
+) {
+    push_preview_with_label(
+        previews,
+        spec,
+        spec.label.to_string(),
+        source_field,
+        uri,
+        content_hint,
+    );
+}
+
+fn push_preview_with_label(
+    previews: &mut Vec<MediaPreview>,
+    spec: &MediaFieldSpec,
+    label: String,
+    source_field: String,
+    uri: String,
+    content_hint: Option<MediaKind>,
+) {
+    let uri = uri.trim().to_string();
+    if uri.is_empty() {
+        return;
+    }
+    previews.push(MediaPreview {
+        kind: detect_media_kind(spec.kind, &uri, content_hint),
+        label,
+        uri,
+        source_field,
+    });
+}
+
+fn content_type_hint(data: &Value) -> Option<MediaKind> {
+    match string_field(data, "contentType")?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image" => Some(MediaKind::Image),
+        "audio" => Some(MediaKind::Audio),
+        "video" => Some(MediaKind::Video),
+        "3d" | "model3d" | "model-3d" => Some(MediaKind::Model3d),
+        _ => None,
+    }
+}
+
+fn detect_media_kind(default: MediaKind, uri: &str, content_hint: Option<MediaKind>) -> MediaKind {
+    let lower = uri.to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return MediaKind::Image;
+    }
+    if lower.starts_with("data:audio/") {
+        return MediaKind::Audio;
+    }
+    if lower.starts_with("data:video/") {
+        return MediaKind::Video;
+    }
+    if lower.starts_with("data:model/") || lower.starts_with("data:application/gltf") {
+        return MediaKind::Model3d;
+    }
+
+    let path = lower
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(lower.as_str())
+        .trim_end_matches('/');
+    if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+    {
+        return MediaKind::Image;
+    }
+    if [".mp3", ".wav", ".ogg", ".flac", ".m4a"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+    {
+        return MediaKind::Audio;
+    }
+    if [".mp4", ".webm", ".mov", ".m4v"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+    {
+        return MediaKind::Video;
+    }
+    if [".glb", ".gltf"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+    {
+        return MediaKind::Model3d;
+    }
+
+    content_hint.unwrap_or(default)
+}
+
+fn string_field(data: &Value, field: &str) -> Option<String> {
+    data.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_array_slots(data: &Value, field: &str) -> Vec<Option<String>> {
+    data.get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let head_len = max_chars.saturating_sub(1) * 2 / 3;
+    let tail_len = max_chars.saturating_sub(1).saturating_sub(head_len);
+    let head = value.chars().take(head_len).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{head}…{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +709,84 @@ mod tests {
         assert_eq!(summary.ready_count, 1);
         assert_eq!(summary.adapter_required_count, 1);
         assert!(summary.sentence().contains("2 media node"));
+    }
+
+    #[test]
+    fn media_preview_prefers_inline_image_over_reference() {
+        let node = WorkflowNode::new(
+            "image",
+            NodeType::ImageInput,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "image": "data:image/png;base64,aGVsbG8=",
+                "imageRef": "gemed-media://media/image.png"
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].kind, MediaKind::Image);
+        assert_eq!(previews[0].source_field, "image");
+        assert_eq!(previews[0].uri, "data:image/png;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn media_preview_uses_reference_when_inline_media_was_externalized() {
+        let node = WorkflowNode::new(
+            "gallery",
+            NodeType::OutputGallery,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "images": ["", "data:image/webp;base64,aGVsbG8="],
+                "imageRefs": ["gemed-media://media/first.png"]
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].uri, "gemed-media://media/first.png");
+        assert_eq!(previews[0].source_field, "imageRefs[0]");
+        assert!(!previews[0].is_renderable_uri());
+        assert_eq!(previews[1].uri, "data:image/webp;base64,aGVsbG8=");
+        assert_eq!(previews[1].source_field, "images[1]");
+        assert!(previews[1].is_renderable_uri());
+    }
+
+    #[test]
+    fn media_preview_detects_legacy_output_video_in_image_field() {
+        let node = WorkflowNode::new(
+            "output",
+            NodeType::Output,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "image": "https://example.invalid/render.mp4?download=1",
+                "contentType": "video"
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].kind, MediaKind::Video);
+    }
+
+    #[test]
+    fn media_preview_reports_3d_model_urls_without_claiming_viewer_adapter() {
+        let node = WorkflowNode::new(
+            "model",
+            NodeType::Generate3d,
+            Position { x: 0.0, y: 0.0 },
+            json!({
+                "output3dUrl": "https://example.invalid/model.glb"
+            }),
+        );
+
+        let previews = media_previews_for_node(&node);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].kind, MediaKind::Model3d);
+        assert_eq!(previews[0].label, "3D model");
     }
 }

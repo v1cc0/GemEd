@@ -9,6 +9,4 @@ repository.workspace = true
 [dependencies]
 gemed_core = { path = "../gemed_core" }
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

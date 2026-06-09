@@ -24,6 +24,7 @@ Implemented now:
 - Provider secret setup/status hints that tell users which desktop environment variable or web backend binding to configure without writing API keys into workflow/provider JSON
 - Fake-transport coverage for the opt-in OpenAI LLM backend so request mapping, authorization header construction, response parsing, and transport errors are tested without real API calls
 - Media capability profiles for image/audio/video/3D-capable nodes, with web/desktop readiness and adapter-gap summaries surfaced in the app sidebar
+- Node-card media preview foundation that detects common inline/reference media fields and renders image/audio/video previews when the URI is directly renderable, while flagging GLB/project-reference adapter gaps honestly
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
@@ -37,8 +38,8 @@ Not implemented yet:
 - Full editable canvas UX: polished drag/handle affordances
 - Broader live Provider/API execution beyond the opt-in OpenAI LLM desktop path
 - Provider secret entry/storage, OS keychain persistence, and web backend/server-function execution
-- Real media/video/3D execution and preview adapters beyond schema/mock capability modeling
-- Media storage polish: richer node-specific preview/player/editor UI affordances and real media transform adapters
+- Real media/video/3D execution adapters beyond schema/mock capability modeling
+- Media storage polish: richer node-specific editor/lightbox/player affordances, GLB/WebGL previews, and real media transform adapters
 
 See `docs/dioxus-rewrite-plan.md` for the full migration plan.
 
