@@ -1,6 +1,6 @@
 # Windows desktop verification
 
-This document is the evidence checklist for the Windows desktop target. Do not mark Windows desktop as verified until a real Windows runner or Windows machine produces the evidence below.
+This document is the evidence checklist for the Windows desktop target. Treat CI build/package verification and interactive WebView2 smoke as separate gates; do not mark interactive Windows desktop behavior as verified until a Windows machine or UI runner launches the app and completes the local smoke below.
 
 ## CI evidence
 
@@ -36,35 +36,38 @@ Record the Windows build result here when it exists:
 
 | Field | Value |
 | --- | --- |
-| Commit SHA | pending |
-| GitHub Actions run URL | pending |
+| Commit SHA | `2181eb925e1c642d2dd606dac2e21b9c4997642f` |
+| GitHub Actions run URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199> |
 | Matrix job | `Windows desktop build` |
-| Artifact | `gemed-windows-desktop-dx-build` |
-| Result | pending |
-| Notes | pending |
+| Job URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199/job/80358232720> |
+| Artifact | `gemed-windows-desktop-dx-build` / artifact ID `7512505812` |
+| Result | success |
+| Notes | Windows runner `dx build --desktop --features desktop` completed successfully. Downloaded artifact contains `target_dx_gemed_debug/windows/app/gemed.exe` (`32872448` bytes), plus `rustc-version.txt`, `cargo-version.txt`, `dioxus-version.txt`, and a manifest. Tool evidence: `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-pc-windows-msvc`, `cargo 1.96.0`, `dioxus 0.8.0-alpha.0 (a82361e)`. |
 
 Record the Windows providers-http build result here when it exists:
 
 | Field | Value |
 | --- | --- |
-| Commit SHA | pending |
-| GitHub Actions run URL | pending |
+| Commit SHA | `2181eb925e1c642d2dd606dac2e21b9c4997642f` |
+| GitHub Actions run URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199> |
 | Matrix job | `Windows desktop providers-http build` |
-| Artifact | `gemed-windows-desktop-providers-http-dx-build` |
-| Result | pending |
-| Notes | pending |
+| Job URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199/job/80358232747> |
+| Artifact | `gemed-windows-desktop-providers-http-dx-build` / artifact ID `7512537555` |
+| Result | success |
+| Notes | Windows runner `dx build --desktop --features desktop,providers-http` completed successfully. Downloaded artifact contains `target_dx_gemed_debug/windows/app/gemed.exe` (`36916224` bytes), plus tool-version files and a manifest. Tool evidence: `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-pc-windows-msvc`, `cargo 1.96.0`, `dioxus 0.8.0-alpha.0 (a82361e)`. |
 
 Record the Windows bundle result here when it exists:
 
 | Field | Value |
 | --- | --- |
-| Commit SHA | pending |
-| GitHub Actions run URL | pending |
+| Commit SHA | `2181eb925e1c642d2dd606dac2e21b9c4997642f` |
+| GitHub Actions run URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199> |
 | Matrix job | `Windows desktop bundle` |
-| Artifact | `gemed-windows-desktop-bundle-dx-build` |
-| Installer | pending `.msi` |
-| Result | pending |
-| Notes | pending |
+| Job URL | <https://github.com/v1cc0/GemEd/actions/runs/27216197199/job/80358232543> |
+| Artifact | `gemed-windows-desktop-bundle-dx-build` / artifact ID `7512528548` |
+| Installer | `target_dx_gemed_bundle/windows/msi/Gemed_0.1.0_x64.msi` (`9879552` bytes) |
+| Result | success |
+| Notes | Windows runner `dx bundle --desktop --features desktop,bundle --package-types msi` completed successfully. Downloaded artifact contains bundled `target_dx_gemed_bundle/windows/gemed.exe` (`32872448` bytes), `Gemed_0.1.0_x64.msi`, `Gemed.wxs`, `Gemed.wixobj`, `Gemed_0.1.0_x64.wixpdb`, staging `gemed.exe`, tool-version files, and bundle manifest. |
 
 ## Local Windows smoke
 
@@ -93,4 +96,4 @@ Then launch the built app or `dx serve --desktop --features desktop` and verify:
 
 ## Current status
 
-Windows is still a foundation target until the CI or local Windows evidence tables above are filled. Linux desktop, web builds, and a local Linux `.deb` bundle are verified in the normal development loop; Windows requires the actual Windows runner because WebView2, path handling, installer tooling, and Dioxus desktop packaging are platform-specific.
+Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. Windows is still a foundation target rather than full interactive verification until a local Windows machine or Windows UI runner launches the app and completes the WebView2 smoke checklist above. Linux desktop, Linux `.deb` bundle, web build, and Chromium web interaction smoke are verified by the normal development loop and CI.
