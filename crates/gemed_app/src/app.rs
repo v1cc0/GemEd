@@ -12,8 +12,8 @@ use gemed_core::{
     split_grid_child_sets, target_handle_options, toggle_group_lock, toggle_node_selection,
 };
 use gemed_executor::{
-    SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
-    execution_order,
+    ExecutionControl, SimpleExecutionReport, execute_simple_workflow_with_control_async,
+    execute_workflow_with_providers_with_control_async, execution_order,
 };
 use gemed_media::{MediaKind, MediaPreview, media_previews_for_node, workflow_media_summary};
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
@@ -236,13 +236,14 @@ pub fn App() -> Element {
     let connection_draft = use_signal(|| None::<ConnectionDraft>);
     let provider_config = use_signal(initial_provider_config);
     let media_overlay = use_signal(|| None::<MediaOverlay>);
+    let active_execution = use_signal(|| None::<ExecutionControl>);
 
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
-            Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft, provider_config }
+            Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft, provider_config, active_execution }
             main { class: "main",
-                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config }
+                Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config, active_execution }
                 WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft, media_overlay }
             }
             MediaOverlayLayer { media_overlay }
@@ -260,7 +261,9 @@ fn Header(
     mut drag_state: Signal<Option<DragState>>,
     mut connection_draft: Signal<Option<ConnectionDraft>>,
     provider_config: Signal<ProviderConfigSet>,
+    mut active_execution: Signal<Option<ExecutionControl>>,
 ) -> Element {
+    let is_execution_active = active_execution.read().is_some();
     rsx! {
         header { class: "header",
             div { class: "brand",
@@ -425,65 +428,123 @@ fn Header(
 
                 button {
                     class: "action primary",
+                    disabled: is_execution_active,
                     onclick: move |_| {
-                        let current = workflow.read().clone();
-                        match execute_simple_workflow(&current) {
-                        Ok(result) => {
-                            let summary = result.report.summary();
-                            match result.workflow.to_pretty_json() {
-                                Ok(json) => json_text.set(json),
-                                Err(err) => message.set(Message::err(format!("Executed but failed to export JSON: {err}"))),
+                        async move {
+                            if active_execution.read().is_some() {
+                                message.set(Message::ok("Execution is already running. Use Cancel Run to request a stop."));
+                                return;
                             }
-                            workflow.set(result.workflow);
-                            execution_report.set(Some(result.report));
-                            undo_stack.write().clear();
-                            drag_state.set(None);
-                            connection_draft.set(None);
-                            message.set(Message::ok(format!("Local executor finished: {summary}.")));
-                        }
-                        Err(err) => {
+                            let current = workflow.read().clone();
+                            let control = ExecutionControl::new();
+                            active_execution.set(Some(control.clone()));
                             execution_report.set(None);
-                            message.set(Message::err(format!("Local executor failed: {err}")));
+                            message.set(Message::ok("Local executor started."));
+
+                            match execute_simple_workflow_with_control_async(&current, &control).await {
+                                Ok(result) => {
+                                    let summary = result.report.summary();
+                                    let cancelled = control.is_cancelled();
+                                    match result.workflow.to_pretty_json() {
+                                        Ok(json) => json_text.set(json),
+                                        Err(err) => message.set(Message::err(format!("Executed but failed to export JSON: {err}"))),
+                                    }
+                                    workflow.set(result.workflow);
+                                    execution_report.set(Some(result.report));
+                                    undo_stack.write().clear();
+                                    drag_state.set(None);
+                                    connection_draft.set(None);
+                                    active_execution.set(None);
+                                    if cancelled {
+                                        message.set(Message::ok(format!(
+                                            "Local executor cancelled: {summary}. Remaining nodes were skipped after the active node finished."
+                                        )));
+                                    } else {
+                                        message.set(Message::ok(format!("Local executor finished: {summary}.")));
+                                    }
+                                }
+                                Err(err) => {
+                                    execution_report.set(None);
+                                    active_execution.set(None);
+                                    message.set(Message::err(format!("Local executor failed: {err}")));
+                                }
+                            }
                         }
-                    }
                     },
                     "Run Local"
                 }
                 button {
                     class: "action",
+                    disabled: is_execution_active,
                     onclick: move |_| {
-                        let current = workflow.read().clone();
-                        let active_provider_config = provider_config.read().clone();
-                        let provider_summary = active_provider_config
-                            .summary_with(provider_secret_env_value)
-                            .sentence();
-                        match build_provider_registry(&active_provider_config) {
-                            Ok(providers) => match execute_workflow_with_providers(&current, &providers) {
-                            Ok(result) => {
-                                let summary = result.report.summary();
-                                match result.workflow.to_pretty_json() {
-                                    Ok(json) => json_text.set(json),
-                                    Err(err) => message.set(Message::err(format!("Executed with providers but failed to export JSON: {err}"))),
+                        async move {
+                            if active_execution.read().is_some() {
+                                message.set(Message::ok("Execution is already running. Use Cancel Run to request a stop."));
+                                return;
+                            }
+                            let current = workflow.read().clone();
+                            let active_provider_config = provider_config.read().clone();
+                            let provider_summary = active_provider_config
+                                .summary_with(provider_secret_env_value)
+                                .sentence();
+                            let control = ExecutionControl::new();
+                            active_execution.set(Some(control.clone()));
+                            execution_report.set(None);
+                            message.set(Message::ok(format!("Provider run started. {provider_summary}")));
+
+                            match build_provider_registry(&active_provider_config) {
+                                Ok(providers) => match execute_workflow_with_providers_with_control_async(&current, &providers, &control).await {
+                                Ok(result) => {
+                                    let summary = result.report.summary();
+                                    let cancelled = control.is_cancelled();
+                                    match result.workflow.to_pretty_json() {
+                                        Ok(json) => json_text.set(json),
+                                        Err(err) => message.set(Message::err(format!("Executed with providers but failed to export JSON: {err}"))),
+                                    }
+                                    workflow.set(result.workflow);
+                                    execution_report.set(Some(result.report));
+                                    undo_stack.write().clear();
+                                    drag_state.set(None);
+                                    connection_draft.set(None);
+                                    active_execution.set(None);
+                                    if cancelled {
+                                        message.set(Message::ok(format!(
+                                            "Provider run cancelled: {summary}. Remaining nodes were skipped after the active provider/media node finished. {provider_summary}"
+                                        )));
+                                    } else {
+                                        message.set(Message::ok(format!("Provider run finished: {summary}. {provider_summary}")));
+                                    }
                                 }
-                                workflow.set(result.workflow);
-                                execution_report.set(Some(result.report));
-                                undo_stack.write().clear();
-                                drag_state.set(None);
-                                connection_draft.set(None);
-                                message.set(Message::ok(format!("Provider run finished: {summary}. {provider_summary}")));
-                            }
-                            Err(err) => {
-                                execution_report.set(None);
-                                message.set(Message::err(format!("Provider run failed: {err}")));
-                            }
-                            },
-                            Err(err) => {
-                                execution_report.set(None);
-                                message.set(Message::err(format!("Provider registry failed: {err}")));
+                                Err(err) => {
+                                    execution_report.set(None);
+                                    active_execution.set(None);
+                                    message.set(Message::err(format!("Provider run failed: {err}")));
+                                }
+                                },
+                                Err(err) => {
+                                    execution_report.set(None);
+                                    active_execution.set(None);
+                                    message.set(Message::err(format!("Provider registry failed: {err}")));
+                                }
                             }
                         }
                     },
                     "Run Providers"
+                }
+                button {
+                    class: "action",
+                    disabled: !is_execution_active,
+                    onclick: move |_| {
+                        if let Some(control) = active_execution.read().clone() {
+                            control.cancel();
+                            message.set(Message::ok(
+                                "Cancellation requested. The active node may finish before remaining nodes are skipped."
+                            ));
+                        } else {
+                            message.set(Message::ok("No workflow execution is currently running."));
+                        }
+                    },
+                    "Cancel Run"
                 }
                 button {
                     class: "action",
@@ -699,6 +760,7 @@ fn Sidebar(
     mut viewport: Signal<CanvasViewport>,
     mut connection_draft: Signal<Option<ConnectionDraft>>,
     mut provider_config: Signal<ProviderConfigSet>,
+    active_execution: Signal<Option<ExecutionControl>>,
 ) -> Element {
     let wf = workflow.read();
     let counts = wf.node_type_counts();
@@ -801,6 +863,7 @@ fn Sidebar(
     let media_sentence = media_summary.sentence();
     let extra_media_profiles = media_summary.profiles.len().saturating_sub(6);
     let report = execution_report.read();
+    let is_execution_active = active_execution.read().is_some();
 
     rsx! {
         aside { class: "sidebar",
@@ -1331,6 +1394,11 @@ fn Sidebar(
             section { class: "panel",
                 h2 { "Execution Spine" }
                 p { "{order_text}" }
+                if is_execution_active {
+                    p { class: "handle-hint",
+                        "Execution is running. Use Cancel Run in the header to request a stop; cancellation is applied before the next node starts."
+                    }
+                }
                 if let Some(report) = report.as_ref() {
                     p { "Last run: {report.summary()}" }
                     div { class: "execution-log",
