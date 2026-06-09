@@ -31,7 +31,8 @@ pub fn source_handle_options(node: &WorkflowNode) -> Vec<NodeHandle> {
         | NodeType::EaseCurve
         | NodeType::VideoTrim => vec![handle("video", "video")],
         NodeType::AudioInput | NodeType::GenerateAudio => vec![handle("audio", "audio")],
-        NodeType::Generate3d | NodeType::GlbViewer => vec![handle("3d", "3D")],
+        NodeType::Generate3d => vec![handle("3d", "3D")],
+        NodeType::GlbViewer => vec![handle("3d", "3D"), handle("image", "snapshot")],
         NodeType::Array => array_source_handles(node),
         NodeType::Switch => switch_source_handles(node),
         NodeType::ConditionalSwitch => conditional_switch_source_handles(node),
@@ -293,7 +294,7 @@ mod tests {
             .map(|handle| handle.id)
             .collect();
 
-        assert_eq!(source_ids, vec!["3d".to_string()]);
+        assert_eq!(source_ids, vec!["3d".to_string(), "image".to_string()]);
         assert_eq!(target_ids, vec!["3d".to_string()]);
     }
 

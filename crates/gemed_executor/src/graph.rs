@@ -317,9 +317,15 @@ fn source_output(
         NodeType::LlmGenerate => string_field(&source.data, "outputText").map(text_output),
         NodeType::Output => string_field(&source.data, "text").map(text_output),
         NodeType::SplitGrid => split_grid_output(source, source_handle).map(image_output),
-        NodeType::GlbViewer => string_field(&source.data, "glbUrl")
-            .or_else(|| string_field(&source.data, "model3d"))
-            .map(model3d_output),
+        NodeType::GlbViewer => {
+            if source_handle == Some("image") {
+                string_field(&source.data, "capturedImage").map(image_output)
+            } else {
+                string_field(&source.data, "glbUrl")
+                    .or_else(|| string_field(&source.data, "model3d"))
+                    .map(model3d_output)
+            }
+        }
         NodeType::OutputGallery
         | NodeType::Router
         | NodeType::Switch
@@ -731,5 +737,54 @@ mod tests {
         let inputs = connected_inputs(&workflow, "llm");
         assert_eq!(inputs.text.as_deref(), Some("a"));
         assert_eq!(inputs.text_items, ["a", "b"]);
+    }
+
+    #[test]
+    fn glb_viewer_routes_model_and_captured_snapshot_by_source_handle() {
+        let workflow = WorkflowFile {
+            name: "glb routing".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "viewer",
+                    NodeType::GlbViewer,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({
+                        "glbUrl": "https://example.invalid/model.glb",
+                        "capturedImage": "data:image/png;base64,SNAPSHOT"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "model_out",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({}),
+                ),
+                WorkflowNode::new(
+                    "image_out",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles("model", "viewer", "model_out", "3d", "3d"),
+                WorkflowEdge::with_handles("image", "viewer", "image_out", "image", "image"),
+            ],
+            ..WorkflowFile::blank()
+        };
+
+        let model_inputs = connected_inputs(&workflow, "model_out");
+        let image_inputs = connected_inputs(&workflow, "image_out");
+
+        assert_eq!(
+            model_inputs.model3d.as_deref(),
+            Some("https://example.invalid/model.glb")
+        );
+        assert!(model_inputs.images.is_empty());
+        assert_eq!(image_inputs.model3d, None);
+        assert_eq!(
+            image_inputs.images,
+            vec!["data:image/png;base64,SNAPSHOT".to_string()]
+        );
     }
 }

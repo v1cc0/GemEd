@@ -1107,10 +1107,10 @@ pub fn media_profile_for_node_type(node_type: &NodeType) -> Option<MediaNodeProf
         ),
         NodeType::GlbViewer => profile(
             node_type,
-            vec![MediaKind::Model3d],
+            vec![MediaKind::Model3d, MediaKind::Image],
             MediaSupportLevel::PreviewOnly,
             MediaSupportLevel::PreviewOnly,
-            "Renderable GLB URIs can preview through the WebView model-viewer adapter; PNG capture still needs an adapter and project refs need hydration.",
+            "Renderable GLB URIs can preview through the WebView model-viewer adapter and expose an opt-in WebView PNG snapshot capture action; project refs need hydration before preview/capture.",
         ),
         NodeType::Output | NodeType::OutputGallery => profile(
             node_type,
@@ -1600,15 +1600,23 @@ mod tests {
     }
 
     #[test]
-    fn glb_viewer_profile_is_preview_only_not_capture_ready() {
+    fn glb_viewer_profile_is_preview_and_opt_in_capture_ready() {
         let profile = media_profile_for_node_type(&NodeType::GlbViewer).unwrap();
 
-        assert_eq!(profile.media_kinds, vec![MediaKind::Model3d]);
+        assert_eq!(
+            profile.media_kinds,
+            vec![MediaKind::Model3d, MediaKind::Image]
+        );
         assert_eq!(profile.web, MediaSupportLevel::PreviewOnly);
         assert_eq!(profile.desktop, MediaSupportLevel::PreviewOnly);
         assert!(!profile.needs_adapter());
         assert!(profile.notes.contains("model-viewer adapter"));
-        assert!(profile.notes.contains("PNG capture still needs an adapter"));
+        assert!(
+            profile
+                .notes
+                .contains("opt-in WebView PNG snapshot capture")
+        );
+        assert!(profile.notes.contains("project refs need hydration"));
     }
 
     #[test]

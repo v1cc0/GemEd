@@ -746,6 +746,11 @@ fn Sidebar(
                 video_frame_capture_request(node.id.clone(), node),
             )
         });
+    let selected_glb_capture = selected_id
+        .as_ref()
+        .and_then(|id| wf.nodes.iter().find(|node| node.id == *id))
+        .filter(|node| node.node_type == NodeType::GlbViewer)
+        .map(|node| (node.id.clone(), glb_capture_request(node.id.clone(), node)));
     let draft_summary = connection_draft
         .read()
         .as_ref()
@@ -1211,6 +1216,46 @@ fn Sidebar(
                             rsx! {
                                 p { class: "viewport-status",
                                     "Adapter unavailable: {reason}"
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((viewer_node_id, capture_request)) = selected_glb_capture.as_ref() {
+                    p { class: "handle-hint",
+                        "GLB Viewer `{viewer_node_id}` can capture a PNG snapshot after Run Local records a renderable glbViewerPlan."
+                    }
+                    match capture_request {
+                        Ok(request) => {
+                            let viewer_node_id = viewer_node_id.clone();
+                            let source_summary = request.source_summary();
+                            rsx! {
+                                div { class: "edge-row",
+                                    code { "{source_summary}" }
+                                    button {
+                                        class: "mini-action neutral",
+                                        onclick: move |event: MouseEvent| {
+                                            event.stop_propagation();
+                                            let viewer_node_id = viewer_node_id.clone();
+                                            async move {
+                                                capture_glb_snapshot_with_webview_adapter(
+                                                    viewer_node_id,
+                                                    workflow,
+                                                    json_text,
+                                                    message,
+                                                    execution_report,
+                                                ).await;
+                                            }
+                                        },
+                                        "Capture PNG"
+                                    }
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            rsx! {
+                                p { class: "viewport-status",
+                                    "GLB capture unavailable: {reason}"
                                 }
                             }
                         }
@@ -2200,6 +2245,12 @@ fn split_grid_insight(node: &WorkflowNode) -> Option<NodeInsight> {
 
 fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
     if let Some(plan) = node.data.get("glbViewerPlan").and_then(Value::as_object) {
+        let captured_output = node
+            .data
+            .get("capturedImage")
+            .and_then(Value::as_str)
+            .filter(|value| value.starts_with("data:image/png;base64,"));
+        let capture_result = node.data.get("glbCaptureResult").and_then(Value::as_object);
         let source = plan.get("source").unwrap_or(&Value::Null);
         let uri_kind = source
             .get("uriKind")
@@ -2252,13 +2303,29 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
         if requires_webgl {
             lines.push("adapter: model URI hydration/WebGL handoff pending".to_string());
         }
-        if requires_capture {
+        if captured_output.is_some() {
+            let adapter = capture_result
+                .and_then(|result| result.get("adapter"))
+                .and_then(Value::as_str)
+                .unwrap_or("webview-model-viewer");
+            let dimensions = capture_result.and_then(|result| {
+                let width = result.get("width").and_then(Value::as_u64)?;
+                let height = result.get("height").and_then(Value::as_u64)?;
+                Some(format!(" · {width}×{height}"))
+            });
+            lines.push(format!(
+                "capture: {adapter} emitted PNG snapshot{}",
+                dimensions.unwrap_or_default()
+            ));
+        } else if requires_capture {
             lines.push(
                 "capture: PNG snapshot adapter pending; no captured image emitted".to_string(),
             );
         }
         return NodeInsight {
-            class: if requires_webgl || requires_capture {
+            class: if captured_output.is_some() || (!requires_webgl && !requires_capture) {
+                "node-insight ready"
+            } else if requires_webgl || requires_capture {
                 "node-insight adapter"
             } else {
                 "node-insight ready"
@@ -2286,7 +2353,7 @@ fn glb_viewer_insight(node: &WorkflowNode) -> NodeInsight {
         title: "GLB viewer plan".to_string(),
         lines: vec![
             "Run Local to inspect GLB URI metadata.".to_string(),
-            "Renderable GLB URIs can preview in WebView; PNG capture still needs a platform adapter."
+            "Renderable GLB URIs can preview in WebView and expose an opt-in model-viewer PNG capture action."
                 .to_string(),
         ],
     }
@@ -2888,6 +2955,277 @@ async fn copy_media_uri(uri: String) -> CopyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct GlbCaptureRequest {
+    node_id: String,
+    source_uri: String,
+    label: String,
+    timeout_ms: u32,
+}
+
+impl GlbCaptureRequest {
+    fn source_summary(&self) -> String {
+        format!("model-viewer PNG · {}", truncate_chars(&self.label, 48))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GlbCaptureSuccess {
+    image: String,
+    width: Option<u64>,
+    height: Option<u64>,
+}
+
+fn glb_capture_request(node_id: String, node: &WorkflowNode) -> Result<GlbCaptureRequest, String> {
+    let source_uri = node
+        .data
+        .get("glbUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "Run Local first so glbViewerPlan records the source GLB.".to_string())?;
+    let plan = node
+        .data
+        .get("glbViewerPlan")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Run Local first so glbViewerPlan records GLB metadata.".to_string())?;
+    let source = plan
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "glbViewerPlan is missing source metadata; run local planning again.".to_string()
+        })?;
+    let renderable = source
+        .get("renderableInWebview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !renderable {
+        let uri_kind = source
+            .get("uriKind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!(
+            "source `{uri_kind}` must be hydrated to a WebView-renderable URI before capture"
+        ));
+    }
+
+    let label = node
+        .data
+        .get("filename")
+        .and_then(Value::as_str)
+        .or_else(|| node.data.get("label").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("GLB snapshot")
+        .to_string();
+
+    Ok(GlbCaptureRequest {
+        node_id,
+        source_uri,
+        label,
+        timeout_ms: 45_000,
+    })
+}
+
+fn glb_capture_script(request: &GlbCaptureRequest) -> String {
+    let source_uri =
+        serde_json::to_string(&request.source_uri).unwrap_or_else(|_| "\"\"".to_string());
+    let label = serde_json::to_string(&request.label).unwrap_or_else(|_| "\"GLB\"".to_string());
+    let module_url =
+        serde_json::to_string(MODEL_VIEWER_MODULE_URL).unwrap_or_else(|_| "\"\"".to_string());
+    let timeout_ms = request.timeout_ms;
+
+    format!(
+        r#"
+const sourceUri = {source_uri};
+const label = {label};
+const moduleUrl = {module_url};
+const timeoutMs = {timeout_ms};
+let objectUrl = null;
+let model = null;
+let timeoutId = null;
+
+const cleanup = () => {{
+    if (timeoutId !== null) {{
+        clearTimeout(timeoutId);
+        timeoutId = null;
+    }}
+    if (model) {{
+        model.remove();
+        model = null;
+    }}
+    if (objectUrl !== null) {{
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+    }}
+}};
+
+try {{
+    const result = await new Promise((resolve, reject) => {{
+        const fail = (error) => reject(error instanceof Error ? error : new Error(String(error)));
+        timeoutId = setTimeout(() => fail(new Error("GLB snapshot timed out")), timeoutMs);
+
+        const start = () => {{
+            model = document.createElement("model-viewer");
+            model.style.position = "fixed";
+            model.style.left = "-10000px";
+            model.style.top = "0";
+            model.style.width = "640px";
+            model.style.height = "480px";
+            model.style.pointerEvents = "none";
+            model.setAttribute("alt", label);
+            model.setAttribute("camera-controls", "");
+            model.setAttribute("reveal", "auto");
+            model.setAttribute("loading", "eager");
+            model.setAttribute("shadow-intensity", "0.7");
+            model.setAttribute("exposure", "1");
+            model.addEventListener("error", () => fail(new Error("model-viewer failed to load GLB")), {{ once: true }});
+            model.addEventListener("load", async () => {{
+                try {{
+                    if (typeof model.toDataURL !== "function") {{
+                        throw new Error("model-viewer toDataURL API is unavailable");
+                    }}
+                    if (typeof model.updateComplete !== "undefined") {{
+                        await model.updateComplete;
+                    }}
+                    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+                    const image = await model.toDataURL("image/png");
+                    resolve({{
+                        ok: true,
+                        image,
+                        width: model.clientWidth || 640,
+                        height: model.clientHeight || 480,
+                        adapter: "webview-model-viewer"
+                    }});
+                }} catch (error) {{
+                    fail(error);
+                }}
+            }}, {{ once: true }});
+            document.body.appendChild(model);
+
+            if (sourceUri.startsWith("data:")) {{
+                fetch(sourceUri)
+                    .then((response) => response.blob())
+                    .then((blob) => {{
+                        objectUrl = URL.createObjectURL(blob);
+                        model.src = objectUrl;
+                    }})
+                    .catch(() => {{
+                        model.src = sourceUri;
+                    }});
+            }} else {{
+                model.src = sourceUri;
+            }}
+        }};
+
+        if (customElements.get("model-viewer")) {{
+            start();
+        }} else {{
+            const script = document.createElement("script");
+            script.type = "module";
+            script.src = moduleUrl;
+            script.onload = () => start();
+            script.onerror = () => fail(new Error("Failed to load model-viewer module"));
+            document.head.appendChild(script);
+        }}
+    }});
+    cleanup();
+    return result;
+}} catch (error) {{
+    cleanup();
+    return {{ ok: false, error: String(error && (error.message || error)), adapter: "webview-model-viewer" }};
+}}
+"#
+    )
+}
+
+fn glb_capture_success_from_eval_value(value: &Value) -> Result<GlbCaptureSuccess, String> {
+    if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or("GLB capture adapter returned an unknown error")
+            .to_string());
+    }
+    let image = value
+        .get("image")
+        .and_then(Value::as_str)
+        .filter(|image| image.starts_with("data:image/png;base64,"))
+        .ok_or_else(|| "GLB capture adapter did not return a PNG data URL".to_string())?;
+    Ok(GlbCaptureSuccess {
+        image: image.to_string(),
+        width: value.get("width").and_then(Value::as_u64),
+        height: value.get("height").and_then(Value::as_u64),
+    })
+}
+
+async fn capture_glb_snapshot_with_webview_adapter(
+    node_id: String,
+    mut workflow: Signal<WorkflowFile>,
+    mut json_text: Signal<String>,
+    mut message: Signal<Message>,
+    mut execution_report: Signal<Option<SimpleExecutionReport>>,
+) {
+    let request = {
+        let snapshot = workflow.read();
+        let Some(node) = snapshot.nodes.iter().find(|node| node.id == node_id) else {
+            message.set(Message::err(format!("GLB Viewer `{node_id}` disappeared.")));
+            return;
+        };
+        match glb_capture_request(node_id.clone(), node) {
+            Ok(request) => request,
+            Err(err) => {
+                message.set(Message::err(format!("GLB capture unavailable: {err}")));
+                return;
+            }
+        }
+    };
+    message.set(Message::ok(format!(
+        "Capturing `{}` via WebView model-viewer adapter...",
+        request.node_id
+    )));
+
+    let script = glb_capture_script(&request);
+    let eval_value = match document::eval(&script).await {
+        Ok(value) => value,
+        Err(err) => {
+            message.set(Message::err(format!("GLB capture eval failed: {err}")));
+            return;
+        }
+    };
+    let success = match glb_capture_success_from_eval_value(&eval_value) {
+        Ok(success) => success,
+        Err(err) => {
+            message.set(Message::err(format!("GLB capture failed: {err}")));
+            return;
+        }
+    };
+
+    let mut next = workflow.read().clone();
+    match apply_glb_capture_success(&mut next, &request.node_id, &success) {
+        Ok(routed_count) => match next.to_pretty_json() {
+            Ok(json) => {
+                workflow.set(next);
+                json_text.set(json);
+                execution_report.set(None);
+                let size = match (success.width, success.height) {
+                    (Some(width), Some(height)) => format!(" · {width}×{height}"),
+                    _ => String::new(),
+                };
+                message.set(Message::ok(format!(
+                    "Captured GLB snapshot for `{}`{size}; routed to {routed_count} downstream image output node(s).",
+                    request.node_id
+                )));
+            }
+            Err(err) => message.set(Message::err(format!(
+                "Captured GLB snapshot but failed to export JSON: {err}"
+            ))),
+        },
+        Err(err) => message.set(Message::err(err)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct VideoFrameCaptureRequest {
     node_id: String,
     source_uri: String,
@@ -3209,6 +3547,59 @@ fn apply_video_frame_capture_success(
     );
     set_node_data_field(&mut workflow.nodes[index], "error", Value::Null);
 
+    route_captured_image_to_downstream_outputs(workflow, node_id, &image, true)
+}
+
+fn apply_glb_capture_success(
+    workflow: &mut WorkflowFile,
+    node_id: &str,
+    success: &GlbCaptureSuccess,
+) -> Result<usize, String> {
+    let Some(index) = workflow
+        .nodes
+        .iter()
+        .position(|node| node.id == node_id && node.node_type == NodeType::GlbViewer)
+    else {
+        return Err(format!("GLB Viewer `{node_id}` was not found."));
+    };
+    let image = success.image.clone();
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "capturedImage",
+        Value::String(image.clone()),
+    );
+    set_node_data_field(&mut workflow.nodes[index], "capturedImageRef", Value::Null);
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "glbCaptureResult",
+        serde_json::json!({
+            "adapter": "webview-model-viewer",
+            "width": success.width,
+            "height": success.height,
+            "outputMime": "image/png"
+        }),
+    );
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "__mediaAdapter",
+        Value::String("webview-model-viewer".to_string()),
+    );
+    set_node_data_field(
+        &mut workflow.nodes[index],
+        "status",
+        Value::String("complete".to_string()),
+    );
+    set_node_data_field(&mut workflow.nodes[index], "error", Value::Null);
+
+    route_captured_image_to_downstream_outputs(workflow, node_id, &image, false)
+}
+
+fn route_captured_image_to_downstream_outputs(
+    workflow: &mut WorkflowFile,
+    node_id: &str,
+    image: &str,
+    allow_unhandled_source_edges: bool,
+) -> Result<usize, String> {
     let downstream_targets = workflow
         .edges
         .iter()
@@ -3218,7 +3609,7 @@ fn apply_video_frame_capture_success(
                     .source_handle
                     .as_deref()
                     .map(|handle| handle == "image")
-                    .unwrap_or(true)
+                    .unwrap_or(allow_unhandled_source_edges)
         })
         .map(|edge| (edge.target.clone(), edge.target_handle.clone()))
         .collect::<Vec<_>>();
@@ -3236,13 +3627,13 @@ fn apply_video_frame_capture_success(
         };
         match target.node_type {
             NodeType::Output => {
-                set_node_data_field(target, "image", Value::String(image.clone()));
+                set_node_data_field(target, "image", Value::String(image.to_string()));
                 set_node_data_field(target, "contentType", Value::String("image".to_string()));
                 set_node_data_field(target, "status", Value::String("complete".to_string()));
                 routed_count += 1;
             }
             NodeType::OutputGallery => {
-                set_node_data_field(target, "images", serde_json::json!([image.clone()]));
+                set_node_data_field(target, "images", serde_json::json!([image]));
                 set_node_data_field(target, "status", Value::String("complete".to_string()));
                 routed_count += 1;
             }
@@ -4982,12 +5373,14 @@ impl CopyStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasRect, CopyStatus, NODE_CARD_HEIGHT, NODE_CARD_WIDTH, VideoFrameCaptureRequest,
-        VideoFrameCaptureSuccess, apply_video_frame_capture_success, bounds_for_node_ids,
-        copy_media_uri_script, ensure_json_extension, media_error_message,
-        media_overlay_from_preview, media_preview_kind_class, node_card_insight,
-        node_ids_intersecting_rect, platform_provider_secret_setup_message,
-        provider_capability_list, provider_default_model_placeholder, provider_secret_setup_hint,
+        CanvasRect, CopyStatus, GlbCaptureRequest, GlbCaptureSuccess, NODE_CARD_HEIGHT,
+        NODE_CARD_WIDTH, VideoFrameCaptureRequest, VideoFrameCaptureSuccess,
+        apply_glb_capture_success, apply_video_frame_capture_success, bounds_for_node_ids,
+        copy_media_uri_script, ensure_json_extension, glb_capture_request, glb_capture_script,
+        glb_capture_success_from_eval_value, media_error_message, media_overlay_from_preview,
+        media_preview_kind_class, node_card_insight, node_ids_intersecting_rect,
+        platform_provider_secret_setup_message, provider_capability_list,
+        provider_default_model_placeholder, provider_secret_setup_hint,
         sanitize_optional_provider_base_url, sanitize_optional_provider_text,
         video_frame_capture_request, video_frame_capture_script,
         video_frame_capture_success_from_eval_value, viewport_for_node_ids, workflow_json_filename,
@@ -5179,6 +5572,215 @@ mod tests {
             rejected.class_name("media-overlay-copy-status"),
             "media-overlay-copy-status err"
         );
+    }
+
+    #[test]
+    fn glb_capture_request_requires_renderable_plan() {
+        let workflow = WorkflowFile {
+            name: "glb capture".to_string(),
+            nodes: vec![WorkflowNode::new(
+                "viewer",
+                NodeType::GlbViewer,
+                Position { x: 0.0, y: 0.0 },
+                serde_json::json!({
+                    "glbUrl": test_inline_glb_data_url(),
+                    "filename": "inline.glb"
+                }),
+            )],
+            ..WorkflowFile::blank()
+        };
+        let planned = gemed_executor::execute_simple_workflow(&workflow).expect("GLB plans");
+        let viewer = planned
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "viewer")
+            .expect("viewer exists");
+
+        let request =
+            glb_capture_request("viewer".to_string(), viewer).expect("inline GLB is renderable");
+
+        assert_eq!(request.node_id, "viewer");
+        assert!(
+            request
+                .source_uri
+                .starts_with("data:model/gltf-binary;base64,")
+        );
+        assert_eq!(request.label, "inline.glb");
+
+        let project_ref = WorkflowNode::new(
+            "viewer",
+            NodeType::GlbViewer,
+            Position { x: 0.0, y: 0.0 },
+            serde_json::json!({
+                "glbUrl": "gemed-media://media/model.glb",
+                "glbViewerPlan": {
+                    "source": {
+                        "uriKind": "projectReference",
+                        "mime": "model/gltf-binary",
+                        "renderableInWebview": false
+                    },
+                    "viewerAdapter": "webview-model-viewer",
+                    "requiresWebglAdapter": true,
+                    "canOpenUriDirectly": false,
+                    "captureOutputMime": "image/png",
+                    "requiresCaptureAdapter": true
+                }
+            }),
+        );
+        let err = glb_capture_request("viewer".to_string(), &project_ref)
+            .expect_err("project refs need hydration first");
+        assert!(err.contains("projectReference"));
+    }
+
+    #[test]
+    fn glb_capture_script_declares_model_viewer_snapshot_contract() {
+        let request = GlbCaptureRequest {
+            node_id: "viewer".to_string(),
+            source_uri: "data:model/gltf-binary;base64,AAAA".to_string(),
+            label: "inline.glb".to_string(),
+            timeout_ms: 1234,
+        };
+
+        let script = glb_capture_script(&request);
+
+        assert!(script.contains("document.createElement(\"model-viewer\")"));
+        assert!(script.contains("@google/model-viewer@4.3.1"));
+        assert!(script.contains("model.toDataURL(\"image/png\")"));
+        assert!(script.contains("URL.revokeObjectURL(objectUrl)"));
+        assert!(script.contains("timeoutMs = 1234"));
+        assert!(script.contains("\"webview-model-viewer\""));
+    }
+
+    #[test]
+    fn glb_capture_success_updates_node_and_downstream_output() {
+        let mut workflow = WorkflowFile {
+            name: "glb capture".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "viewer",
+                    NodeType::GlbViewer,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({
+                        "glbUrl": "data:model/gltf-binary;base64,AAAA",
+                        "capturedImage": null,
+                        "glbViewerPlan": {}
+                    }),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({}),
+                ),
+                WorkflowNode::new(
+                    "gallery",
+                    NodeType::OutputGallery,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({ "images": [] }),
+                ),
+                WorkflowNode::new(
+                    "legacy",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    serde_json::json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::with_handles("e1", "viewer", "output", "image", "image"),
+                WorkflowEdge::with_handles("e2", "viewer", "gallery", "image", "image"),
+                WorkflowEdge::new("e3", "viewer", "legacy"),
+            ],
+            ..WorkflowFile::blank()
+        };
+        let success = GlbCaptureSuccess {
+            image: "data:image/png;base64,AAAA".to_string(),
+            width: Some(640),
+            height: Some(480),
+        };
+
+        let routed =
+            apply_glb_capture_success(&mut workflow, "viewer", &success).expect("capture applies");
+        let viewer = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "viewer")
+            .unwrap();
+        let output = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        let gallery = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "gallery")
+            .unwrap();
+        let legacy = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "legacy")
+            .unwrap();
+
+        assert_eq!(routed, 2);
+        assert_eq!(
+            viewer.data.get("capturedImage").and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            viewer.data.get("__mediaAdapter").and_then(Value::as_str),
+            Some("webview-model-viewer")
+        );
+        assert_eq!(
+            viewer
+                .data
+                .get("glbCaptureResult")
+                .and_then(|result| result.get("width"))
+                .and_then(Value::as_u64),
+            Some(640)
+        );
+        assert_eq!(
+            output.data.get("image").and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            gallery
+                .data
+                .get("images")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(
+            legacy.data.get("image").and_then(Value::as_str),
+            None,
+            "GLB capture must not route snapshots through legacy/no-handle edges; those remain 3D model edges"
+        );
+
+        let insight = node_card_insight(viewer).expect("GLB insight remains available");
+        assert_eq!(insight.class, "node-insight ready");
+        assert!(
+            insight
+                .lines
+                .iter()
+                .any(|line| line.contains("webview-model-viewer emitted PNG snapshot"))
+        );
+    }
+
+    #[test]
+    fn glb_capture_eval_parser_rejects_failed_or_non_png_results() {
+        let failed = glb_capture_success_from_eval_value(
+            &serde_json::json!({ "ok": false, "error": "snapshot failed" }),
+        )
+        .expect_err("adapter errors propagate");
+        let non_png = glb_capture_success_from_eval_value(
+            &serde_json::json!({ "ok": true, "image": "data:image/jpeg;base64,AAAA" }),
+        )
+        .expect_err("only PNG GLB captures are accepted");
+
+        assert_eq!(failed, "snapshot failed");
+        assert!(non_png.contains("PNG data URL"));
     }
 
     #[test]

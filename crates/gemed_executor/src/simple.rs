@@ -716,7 +716,7 @@ fn execute_glb_viewer(node: &WorkflowNode, inputs: &ConnectedInputs) -> NodeOutc
             updates.insert("__mediaAdapter".to_string(), json!("rust-glb-viewer-plan"));
 
             let message = if can_open_uri_directly {
-                "GLB viewer WebView preview planned; PNG capture remains platform adapter work."
+                "GLB viewer WebView preview planned; PNG capture is available through the opt-in WebView model-viewer action."
             } else {
                 "GLB viewer adapter boundary planned; project media must be hydrated before WebView preview/capture."
             };
@@ -1645,10 +1645,17 @@ mod tests {
                     Position { x: 0.0, y: 0.0 },
                     json!({}),
                 ),
+                WorkflowNode::new(
+                    "snapshot_output",
+                    NodeType::Output,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({}),
+                ),
             ],
-            edges: vec![WorkflowEdge::with_handles(
-                "e1", "viewer", "output", "3d", "3d",
-            )],
+            edges: vec![
+                WorkflowEdge::with_handles("e1", "viewer", "output", "3d", "3d"),
+                WorkflowEdge::with_handles("e2", "viewer", "snapshot_output", "image", "image"),
+            ],
             ..WorkflowFile::blank()
         };
 
@@ -1664,6 +1671,12 @@ mod tests {
             .nodes
             .iter()
             .find(|node| node.id == "output")
+            .unwrap();
+        let snapshot_output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "snapshot_output")
             .unwrap();
         let plan = viewer
             .data
@@ -1697,6 +1710,11 @@ mod tests {
             output.data.get("model3d").and_then(Value::as_str),
             Some(source),
             "GLB viewer should route the model reference, not a fake capture"
+        );
+        assert_eq!(
+            snapshot_output.data.get("image").and_then(Value::as_str),
+            None,
+            "GLB viewer should not route a fake PNG snapshot through the image handle during Run Local"
         );
         assert_eq!(result.report.error_count(), 0);
         assert_eq!(result.report.skipped_count(), 0);
