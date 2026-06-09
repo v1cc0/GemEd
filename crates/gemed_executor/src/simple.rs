@@ -14,7 +14,34 @@ use gemed_providers::{
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionControl {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ExecutionControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SimpleExecutionReport {
@@ -125,7 +152,26 @@ pub fn execute_simple_workflow(
 pub async fn execute_simple_workflow_async(
     workflow: &WorkflowFile,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
-    execute_workflow_inner(workflow, &ProviderRegistry::new()).await
+    let providers = ProviderRegistry::new();
+    let control = ExecutionControl::new();
+    execute_workflow_inner(workflow, &providers, &control).await
+}
+
+pub fn execute_simple_workflow_with_control(
+    workflow: &WorkflowFile,
+    control: &ExecutionControl,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_simple_workflow_with_control_async(
+        workflow, control,
+    ))
+}
+
+pub async fn execute_simple_workflow_with_control_async(
+    workflow: &WorkflowFile,
+    control: &ExecutionControl,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    let providers = ProviderRegistry::new();
+    execute_workflow_inner(workflow, &providers, control).await
 }
 
 pub fn execute_workflow_with_providers(
@@ -139,12 +185,32 @@ pub async fn execute_workflow_with_providers_async(
     workflow: &WorkflowFile,
     providers: &ProviderRegistry,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
-    execute_workflow_inner(workflow, providers).await
+    let control = ExecutionControl::new();
+    execute_workflow_inner(workflow, providers, &control).await
+}
+
+pub fn execute_workflow_with_providers_with_control(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    control: &ExecutionControl,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_workflow_with_providers_with_control_async(
+        workflow, providers, control,
+    ))
+}
+
+pub async fn execute_workflow_with_providers_with_control_async(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    control: &ExecutionControl,
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    execute_workflow_inner(workflow, providers, control).await
 }
 
 async fn execute_workflow_inner(
     workflow: &WorkflowFile,
     providers: &ProviderRegistry,
+    control: &ExecutionControl,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let mut workflow = workflow.clone();
     let order = execution_order(&workflow)?;
@@ -157,6 +223,10 @@ async fn execute_workflow_inner(
             .position(|node| node.id == node_id)
             .ok_or_else(|| SimpleExecutionError::MissingNode(node_id.clone()))?;
         let node_type = workflow.nodes[index].node_type.title().to_string();
+        if control.is_cancelled() {
+            mark_node_cancelled(&mut workflow.nodes[index], &mut report, node_id, node_type);
+            continue;
+        }
         push_report_event(
             &mut report,
             node_id.clone(),
@@ -215,6 +285,18 @@ fn push_report_event(
         status,
         message: message.into(),
     });
+}
+
+fn mark_node_cancelled(
+    node: &mut WorkflowNode,
+    report: &mut SimpleExecutionReport,
+    node_id: String,
+    node_type: String,
+) {
+    let message = "Node skipped because workflow execution was cancelled.";
+    set_status(node, NodeStatusWire::Skipped);
+    set_data_field(node, "error", json!(message));
+    push_report_event(report, node_id, node_type, NodeStatusWire::Skipped, message);
 }
 
 #[derive(Debug, Clone)]
@@ -1000,8 +1082,14 @@ fn string_array_field(data: &Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use gemed_core::{
         GroupColor, NodeGroup, Position, Size, WorkflowEdge, generate_split_grid_children,
+    };
+    use gemed_providers::{
+        AudioProvider, AudioResponse, ImageProvider, ImageResponse, LlmProvider, LlmResponse,
+        Model3dProvider, Model3dResponse, ModelCatalog, ProviderBackend, ProviderModel,
+        VideoProvider, VideoResponse,
     };
     use indexmap::IndexMap;
 
@@ -1088,6 +1176,144 @@ mod tests {
         assert_eq!(result.report.events[2].status, NodeStatusWire::Loading);
         assert_eq!(result.report.events[3].node_id, "output");
         assert_eq!(result.report.events[3].status, NodeStatusWire::Complete);
+    }
+
+    #[test]
+    fn cancelled_before_execution_skips_every_node_without_starting() {
+        let workflow = WorkflowFile {
+            name: "cancel before start".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"text":"should not run"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::new("e1", "prompt", "output")],
+            ..WorkflowFile::blank()
+        };
+        let control = ExecutionControl::new();
+        control.cancel();
+
+        let result =
+            execute_simple_workflow_with_control(&workflow, &control).expect("execution cancels");
+
+        assert_eq!(result.report.loading_count(), 0);
+        assert_eq!(result.report.executed_count(), 0);
+        assert_eq!(result.report.skipped_count(), 2);
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(result.report.summary(), "0 complete, 2 skipped, 0 errors");
+        assert!(
+            result
+                .report
+                .events
+                .iter()
+                .all(|event| event.status == NodeStatusWire::Skipped
+                    && event.message.contains("cancelled"))
+        );
+        assert!(
+            result.workflow.nodes.iter().all(|node| node
+                .data
+                .get("status")
+                .and_then(Value::as_str)
+                == Some("skipped"))
+        );
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+        assert_eq!(output.data.get("text").and_then(Value::as_str), None);
+    }
+
+    #[test]
+    fn cancellation_after_provider_node_skips_remaining_nodes() {
+        let workflow = WorkflowFile {
+            name: "cancel after provider".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"prompt":"stop after provider"}),
+                ),
+                WorkflowNode::new(
+                    "llm",
+                    NodeType::LlmGenerate,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({"provider":"mock","model":"cancel-model"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 200.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![
+                WorkflowEdge::new("e1", "prompt", "llm"),
+                WorkflowEdge::new("e2", "llm", "output"),
+            ],
+            ..WorkflowFile::blank()
+        };
+        let control = ExecutionControl::new();
+        let providers = ProviderRegistry::with_provider(CancellingLlmProvider {
+            control: control.clone(),
+        });
+
+        let result = execute_workflow_with_providers_with_control(&workflow, &providers, &control)
+            .expect("execution cancels downstream");
+
+        let llm = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "llm")
+            .unwrap();
+        let output = result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "output")
+            .unwrap();
+
+        assert!(control.is_cancelled());
+        assert_eq!(result.report.loading_count(), 2);
+        assert_eq!(result.report.executed_count(), 2);
+        assert_eq!(result.report.skipped_count(), 1);
+        assert_eq!(result.report.error_count(), 0);
+        assert_eq!(
+            llm.data.get("outputText").and_then(Value::as_str),
+            Some("cancelled after provider")
+        );
+        assert_eq!(
+            output.data.get("status").and_then(Value::as_str),
+            Some("skipped")
+        );
+        assert_eq!(output.data.get("text").and_then(Value::as_str), None);
+        assert_eq!(
+            result
+                .report
+                .events
+                .iter()
+                .map(|event| (event.node_id.as_str(), event.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("prompt", NodeStatusWire::Loading),
+                ("prompt", NodeStatusWire::Complete),
+                ("llm", NodeStatusWire::Loading),
+                ("llm", NodeStatusWire::Complete),
+                ("output", NodeStatusWire::Skipped),
+            ]
+        );
     }
 
     #[test]
@@ -1882,5 +2108,86 @@ mod tests {
             Some("rust-video-frame-grab-plan-unavailable")
         );
         assert_eq!(result.report.error_count(), 1);
+    }
+
+    struct CancellingLlmProvider {
+        control: ExecutionControl,
+    }
+
+    impl ProviderBackend for CancellingLlmProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Mock
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl ModelCatalog for CancellingLlmProvider {
+        async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl LlmProvider for CancellingLlmProvider {
+        async fn generate_text(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+            self.control.cancel();
+            Ok(LlmResponse {
+                text: "cancelled after provider".to_string(),
+                provider: ProviderId::Mock,
+                model: request.model,
+            })
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl ImageProvider for CancellingLlmProvider {
+        async fn generate_image(
+            &self,
+            _request: ImageRequest,
+        ) -> Result<ImageResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-test".to_string(),
+                "image",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl VideoProvider for CancellingLlmProvider {
+        async fn generate_video(
+            &self,
+            _request: VideoRequest,
+        ) -> Result<VideoResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-test".to_string(),
+                "video",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl AudioProvider for CancellingLlmProvider {
+        async fn generate_audio(
+            &self,
+            _request: AudioRequest,
+        ) -> Result<AudioResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-test".to_string(),
+                "audio",
+            ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Model3dProvider for CancellingLlmProvider {
+        async fn generate_model3d(
+            &self,
+            _request: Model3dRequest,
+        ) -> Result<Model3dResponse, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cancel-test".to_string(),
+                "3d",
+            ))
+        }
     }
 }

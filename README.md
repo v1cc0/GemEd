@@ -28,6 +28,7 @@ Implemented now:
 - Header action to load the built-in Media Sample and exercise the JSON import/export → node-card preview path without external provider calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
 - Execution spine panel, Run Local action for pure-Rust workflow smoke runs, Run Providers action for configured provider-trait smoke runs, and per-node loading → terminal execution events for progress/status visibility
+- Executor cancellation-control foundation with backward-compatible APIs plus tests for pre-run cancellation and downstream skip behavior after a provider-triggered cancel
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
