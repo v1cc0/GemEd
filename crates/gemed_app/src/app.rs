@@ -3429,6 +3429,11 @@ async fn run_desktop_webview_self_smoke() -> Result<DesktopWebviewSelfSmokeRepor
         .map_err(|err| format!("GLB capture adapter failed: {err}"))?;
     let glb_routes = apply_glb_capture_success(&mut glb_workflow, "media_glb", &glb_success)
         .map_err(|err| format!("GLB capture routing failed: {err}"))?;
+    if glb_routes == 0 {
+        return Err(
+            "GLB capture did not route to any downstream snapshot output node.".to_string(),
+        );
+    }
 
     let final_json = glb_workflow
         .to_pretty_json()

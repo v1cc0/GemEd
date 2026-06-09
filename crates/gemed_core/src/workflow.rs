@@ -166,6 +166,20 @@ impl WorkflowFile {
                         "filename": "gemed-triangle.glb"
                     }),
                 ),
+                WorkflowNode::new(
+                    "media_glb_snapshot",
+                    NodeType::Output,
+                    Position {
+                        x: 1120.0,
+                        y: 430.0,
+                    },
+                    serde_json::json!({
+                        "label": "GLB Snapshot Output",
+                        "status": "idle",
+                        "contentType": "image",
+                        "image": null
+                    }),
+                ),
             ],
             edges: vec![
                 WorkflowEdge::with_handles(
@@ -188,6 +202,13 @@ impl WorkflowFile {
                     "media_gallery",
                     "audio",
                     "audio",
+                ),
+                WorkflowEdge::with_handles(
+                    "edge_glb_snapshot_output",
+                    "media_glb",
+                    "media_glb_snapshot",
+                    "image",
+                    "image",
                 ),
             ],
             ..Self::blank()
@@ -1246,8 +1267,8 @@ mod tests {
     fn media_preview_sample_workflow_is_valid_and_roundtrips() {
         let workflow = WorkflowFile::media_preview_example();
         workflow.validate().expect("media sample validates");
-        assert_eq!(workflow.nodes.len(), 5);
-        assert_eq!(workflow.edges.len(), 3);
+        assert_eq!(workflow.nodes.len(), 6);
+        assert_eq!(workflow.edges.len(), 4);
         assert!(
             workflow
                 .nodes
@@ -1266,6 +1287,12 @@ mod tests {
                 .iter()
                 .any(|node| node.data.get("video").is_some_and(Value::is_string))
         );
+        assert!(workflow.edges.iter().any(|edge| {
+            edge.source == "media_glb"
+                && edge.target == "media_glb_snapshot"
+                && edge.source_handle.as_deref() == Some("image")
+                && edge.target_handle.as_deref() == Some("image")
+        }));
 
         let json = workflow.to_pretty_json().expect("serialize media sample");
         let parsed = WorkflowFile::from_json_str(&json).expect("parse media sample");

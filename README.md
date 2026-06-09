@@ -118,7 +118,7 @@ cargo clippy --workspace --all-targets --no-default-features --features web -- -
 cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 ```
 
-CI mirrors these gates, runs the web interaction smoke in Chromium, and runs a manually triggerable Dioxus matrix for web build, Linux/Windows desktop builds including `providers-http`, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`. Local native Linux WebKitGTK adapter validation is available with `GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop`.
+CI mirrors these gates, runs the web interaction smoke in Chromium, and runs a manually triggerable Dioxus matrix for web build, Linux/Windows desktop builds including `providers-http`, and Linux/Windows desktop bundle evidence in `.github/workflows/ci.yml`. Local native Linux WebKitGTK adapter validation is available with `GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop`; the same self-smoke is available as an opt-in Windows WebView2 `workflow_dispatch` job via `windows_webview_smoke=true`.
 
 ## Notes
 

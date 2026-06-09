@@ -160,7 +160,7 @@ Expected decisive output:
 
 ```text
 [gemed-desktop-self-smoke] START env=GEMED_DESKTOP_SELF_SMOKE=1 target=desktop-webview
-[gemed-desktop-self-smoke] PASS Frame Sample capture PASS 16×16, routed 1; Media Sample GLB capture PASS 640×480, routed 0.
+[gemed-desktop-self-smoke] PASS Frame Sample capture PASS 16×16, routed 1; Media Sample GLB capture PASS 640×480, routed 1.
 ```
 
 This is native Linux WebKitGTK evidence, not Windows WebView2 evidence. It also intentionally bypasses external Wayland/X11 click automation: on native Wayland compositors, `xdotool` may not see WebKitGTK windows at all, while the self-smoke still exercises the real WebView JavaScript/runtime boundary.
@@ -174,4 +174,4 @@ On 2026-06-09, from this repo state:
 - `xdotool search --name GemEd` did not see the native Wayland window, so external click automation was not reliable evidence on this host.
 - `rtk timeout 180s env GEMED_DESKTOP_SELF_SMOKE=1 cargo run --features desktop` exited `0` with:
   - `Frame Sample capture PASS 16×16, routed 1`
-  - `Media Sample GLB capture PASS 640×480, routed 0`
+  - `Media Sample GLB capture PASS 640×480, routed 1`

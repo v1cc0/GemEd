@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_webview_smoke:
+        description: "Run the Windows WebView2 desktop self-smoke"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -326,4 +332,52 @@ jobs:
         with:
           name: gemed-${{ matrix.target }}-dx-build
           path: ci-artifacts/${{ matrix.target }}
+          if-no-files-found: warn
+
+  windows-webview2-self-smoke:
+    name: Windows desktop WebView2 self-smoke
+    runs-on: windows-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_webview_smoke }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Record tool versions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "ci-artifacts/windows-webview2-self-smoke" | Out-Null
+          rustc -Vv | Tee-Object -FilePath "ci-artifacts/windows-webview2-self-smoke/rustc-version.txt"
+          cargo -V | Tee-Object -FilePath "ci-artifacts/windows-webview2-self-smoke/cargo-version.txt"
+
+      - name: Run desktop WebView2 self-smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifactDir = "ci-artifacts/windows-webview2-self-smoke"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $log = "$artifactDir/windows-webview2-self-smoke.log"
+          $env:GEMED_DESKTOP_SELF_SMOKE = "1"
+          cargo run --features desktop 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Write-Error "Windows WebView2 self-smoke exited with code $exitCode."
+            exit $exitCode
+          }
+          if (-not (Select-String -Path $log -Pattern "\[gemed-desktop-self-smoke\] PASS" -Quiet)) {
+            Write-Error "Windows WebView2 self-smoke did not print the PASS marker."
+            exit 1
+          }
+
+      - name: Upload Windows WebView2 self-smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemed-windows-webview2-self-smoke
+          path: ci-artifacts/windows-webview2-self-smoke
           if-no-files-found: warn

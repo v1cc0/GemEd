@@ -5,13 +5,22 @@ This document is the evidence checklist for the Windows desktop target. Treat CI
 ## CI evidence
 
 The GitHub Actions Dioxus matrix includes both Windows build and bundle jobs on `windows-latest`.
-It runs on `push` to `main`, pull requests, and manual `workflow_dispatch` runs so Windows evidence can be collected without changing source code:
+It runs on `push` to `main`, pull requests, and manual `workflow_dispatch` runs so Windows build/package evidence can be collected without changing source code:
 
 ```bash
 dx build --desktop --features desktop
 dx build --desktop --features desktop,providers-http
 dx bundle --desktop --features desktop,bundle --package-types msi
 ```
+
+The workflow also has an opt-in manual `windows_webview_smoke` input. When that input is true, the `Windows desktop WebView2 self-smoke` job runs:
+
+```powershell
+$env:GEMED_DESKTOP_SELF_SMOKE = "1"
+cargo run --features desktop
+```
+
+That self-smoke launches the real Dioxus Desktop app on the Windows runner, exercises the Frame Sample video/canvas capture adapter and Media Sample GLB model-viewer capture adapter through WebView2, checks for the `[gemed-desktop-self-smoke] PASS` marker, and uploads `gemed-windows-webview2-self-smoke`. Keep this separate from the normal matrix because GUI/WebView runtime behavior can be runner-dependent.
 
 Each Dioxus matrix job uploads an artifact named from its matrix target:
 
@@ -56,6 +65,18 @@ Record the Windows providers-http build result here when it exists:
 | Result | success |
 | Notes | Windows runner `dx build --desktop --features desktop,providers-http` completed successfully. Downloaded artifact contains `target_dx_gemed_debug/windows/app/gemed.exe` (`36916224` bytes), plus tool-version files and a manifest. Tool evidence: `rustc 1.96.0 (ac68faa20 2026-05-25)`, host `x86_64-pc-windows-msvc`, `cargo 1.96.0`, `dioxus 0.8.0-alpha.0 (a82361e)`. |
 
+
+Record the Windows WebView2 self-smoke result here when it exists:
+
+| Field | Value |
+| --- | --- |
+| Commit SHA | pending |
+| GitHub Actions run URL | pending |
+| Job | `Windows desktop WebView2 self-smoke` |
+| Artifact | `gemed-windows-webview2-self-smoke` |
+| Result | pending |
+| Notes | Pending opt-in `workflow_dispatch` run with `windows_webview_smoke=true`. Expected PASS marker includes `Frame Sample capture PASS 16×16, routed 1` and `Media Sample GLB capture PASS 640×480, routed 1`. |
+
 Record the Windows bundle result here when it exists:
 
 | Field | Value |
@@ -96,4 +117,4 @@ Then launch the built app or `dx serve --desktop --features desktop` and verify:
 
 ## Current status
 
-Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. Windows is still a foundation target rather than full interactive verification until a local Windows machine or Windows UI runner launches the app and completes the WebView2 smoke checklist above. Linux desktop builds, Linux `.deb` bundle, web build, Chromium web interaction smoke, and native Linux WebKitGTK Frame/GLB adapter self-smoke are verified; the Linux self-smoke does not prove Windows WebView2 behavior.
+Windows CI build and MSI bundle evidence is now filled from a real `windows-latest` runner. A manual Windows WebView2 self-smoke job is now available but remains pending until a `workflow_dispatch` run with `windows_webview_smoke=true` completes. Windows remains a foundation target rather than full interactive verification until that job or a local Windows machine/UI runner completes the WebView2 smoke checklist above. Linux desktop builds, Linux `.deb` bundle, web build, Chromium web interaction smoke, and native Linux WebKitGTK Frame/GLB adapter self-smoke are verified; the Linux self-smoke does not prove Windows WebView2 behavior.
