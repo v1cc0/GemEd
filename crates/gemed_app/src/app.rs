@@ -5417,10 +5417,12 @@ mod tests {
         video_frame_capture_success_from_eval_value, viewport_for_node_ids, workflow_json_filename,
     };
     use gemed_core::{
-        NodeType, Position, WorkflowEdge, WorkflowFile, WorkflowNode, generate_split_grid_children,
+        NodeType, Position, WorkflowEdge, WorkflowFile, WorkflowNode, add_edge_between,
+        generate_split_grid_children,
     };
     use gemed_media::{MediaKind, MediaPreview, media_previews_for_node};
     use gemed_providers::{ProviderCapability, ProviderConfig, ProviderId};
+    use gemed_storage::{MemoryWorkflowStorage, WorkflowStorage};
     use serde_json::Value;
     use std::path::PathBuf;
 
@@ -6081,6 +6083,103 @@ mod tests {
                 "{node_id} should receive deterministic mock provider text"
             );
         }
+    }
+
+    #[test]
+    fn release_smoke_create_save_load_run_local_and_mock_provider_paths() {
+        let opened_example = WorkflowFile::example();
+        opened_example.validate().expect("built-in example opens");
+
+        let mut created = WorkflowFile {
+            name: "Release Smoke Created Workflow".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "smoke_prompt",
+                    NodeType::Prompt,
+                    Position { x: 80.0, y: 100.0 },
+                    serde_json::json!({
+                        "label": "Smoke Prompt",
+                        "text": "release smoke text"
+                    }),
+                ),
+                WorkflowNode::new(
+                    "smoke_output",
+                    NodeType::Output,
+                    Position { x: 420.0, y: 100.0 },
+                    serde_json::json!({
+                        "label": "Smoke Output",
+                        "contentType": "text"
+                    }),
+                ),
+            ],
+            ..WorkflowFile::blank()
+        };
+        let edge = add_edge_between(
+            &mut created,
+            "smoke_prompt",
+            "smoke_output",
+            Some("text".to_string()),
+            Some("text".to_string()),
+        )
+        .expect("created workflow connects handles");
+        assert_eq!(edge.source_handle.as_deref(), Some("text"));
+        assert_eq!(edge.target_handle.as_deref(), Some("text"));
+
+        let mut storage = MemoryWorkflowStorage::new();
+        let snapshot = storage
+            .save_workflow("release-smoke", &created)
+            .expect("created workflow saves");
+        assert_eq!(snapshot.slot, "release-smoke");
+        assert!(snapshot.json.contains("Release Smoke Created Workflow"));
+
+        let loaded = storage
+            .load_workflow("release-smoke")
+            .expect("created workflow loads");
+        assert_eq!(loaded.name, created.name);
+        assert_eq!(loaded.nodes.len(), 2);
+        assert_eq!(loaded.edges.len(), 1);
+
+        let local_result =
+            gemed_executor::execute_simple_workflow(&loaded).expect("created workflow runs");
+        assert_eq!(local_result.report.error_count(), 0);
+        assert_eq!(local_result.report.skipped_count(), 0);
+        assert_eq!(local_result.report.loading_count(), loaded.nodes.len());
+        assert_eq!(local_result.report.executed_count(), loaded.nodes.len());
+        let output = local_result
+            .workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "smoke_output")
+            .expect("smoke output exists");
+        assert_eq!(
+            output.data.get("text").and_then(Value::as_str),
+            Some("release smoke text")
+        );
+
+        let provider_workflow = WorkflowFile::llm_provider_example();
+        let providers = gemed_providers::ProviderRegistry::mock_from_config(
+            &gemed_providers::ProviderConfigSet::mock_all(),
+        );
+        let provider_result =
+            gemed_executor::execute_workflow_with_providers(&provider_workflow, &providers)
+                .expect("mock provider workflow runs");
+
+        assert_eq!(provider_result.report.error_count(), 0);
+        assert_eq!(provider_result.report.skipped_count(), 0);
+        assert_eq!(
+            provider_result.report.loading_count(),
+            provider_workflow.nodes.len()
+        );
+        assert!(
+            provider_result
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.id == "provider_gemini_output")
+                .and_then(|node| node.data.get("text"))
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("[mock:gemini:gemini-3.5-flash]"))
+        );
     }
 
     #[test]

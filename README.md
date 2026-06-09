@@ -32,6 +32,7 @@ Implemented now:
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, ref-preserving media hydration on load, and split-grid rerun coverage after project roundtrip
 - Web, Linux desktop, and Linux `.deb` bundle verification
+- Rust release-smoke coverage for opening a built-in example, creating/connecting a workflow, save/load through storage, running a no-provider workflow, and running the mock provider sample
 - Real Chromium web interaction smoke for Frame Sample `Capture`, local-first GLB preview, and GLB `Capture PNG`; see `docs/webview-interaction-smoke.md`
 - Windows desktop foundation through Dioxus desktop feature, Windows GUI subsystem setting, app/bundle icon configuration, CI build/bundle matrix, and the evidence checklist in `docs/windows-desktop-verification.md`
 
