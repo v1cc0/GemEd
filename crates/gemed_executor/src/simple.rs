@@ -95,6 +95,8 @@ pub struct NodeExecutionEvent {
     pub message: String,
 }
 
+pub type ExecutionProgressCallback<'a> = &'a mut dyn FnMut(NodeExecutionEvent);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NodeStatusWire {
@@ -154,7 +156,26 @@ pub async fn execute_simple_workflow_async(
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let providers = ProviderRegistry::new();
     let control = ExecutionControl::new();
-    execute_workflow_inner(workflow, &providers, &control).await
+    let mut progress = |_| {};
+    execute_workflow_inner(workflow, &providers, &control, &mut progress).await
+}
+
+pub fn execute_simple_workflow_with_progress(
+    workflow: &WorkflowFile,
+    on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_simple_workflow_with_progress_async(
+        workflow, on_event,
+    ))
+}
+
+pub async fn execute_simple_workflow_with_progress_async(
+    workflow: &WorkflowFile,
+    mut on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    let providers = ProviderRegistry::new();
+    let control = ExecutionControl::new();
+    execute_workflow_inner(workflow, &providers, &control, &mut on_event).await
 }
 
 pub fn execute_simple_workflow_with_control(
@@ -171,7 +192,27 @@ pub async fn execute_simple_workflow_with_control_async(
     control: &ExecutionControl,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let providers = ProviderRegistry::new();
-    execute_workflow_inner(workflow, &providers, control).await
+    let mut progress = |_| {};
+    execute_workflow_inner(workflow, &providers, control, &mut progress).await
+}
+
+pub fn execute_simple_workflow_with_control_and_progress(
+    workflow: &WorkflowFile,
+    control: &ExecutionControl,
+    on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_simple_workflow_with_control_and_progress_async(
+        workflow, control, on_event,
+    ))
+}
+
+pub async fn execute_simple_workflow_with_control_and_progress_async(
+    workflow: &WorkflowFile,
+    control: &ExecutionControl,
+    mut on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    let providers = ProviderRegistry::new();
+    execute_workflow_inner(workflow, &providers, control, &mut on_event).await
 }
 
 pub fn execute_workflow_with_providers(
@@ -186,7 +227,27 @@ pub async fn execute_workflow_with_providers_async(
     providers: &ProviderRegistry,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let control = ExecutionControl::new();
-    execute_workflow_inner(workflow, providers, &control).await
+    let mut progress = |_| {};
+    execute_workflow_inner(workflow, providers, &control, &mut progress).await
+}
+
+pub fn execute_workflow_with_providers_with_progress(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(execute_workflow_with_providers_with_progress_async(
+        workflow, providers, on_event,
+    ))
+}
+
+pub async fn execute_workflow_with_providers_with_progress_async(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    mut on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    let control = ExecutionControl::new();
+    execute_workflow_inner(workflow, providers, &control, &mut on_event).await
 }
 
 pub fn execute_workflow_with_providers_with_control(
@@ -204,13 +265,37 @@ pub async fn execute_workflow_with_providers_with_control_async(
     providers: &ProviderRegistry,
     control: &ExecutionControl,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
-    execute_workflow_inner(workflow, providers, control).await
+    let mut progress = |_| {};
+    execute_workflow_inner(workflow, providers, control, &mut progress).await
+}
+
+pub fn execute_workflow_with_providers_with_control_and_progress(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    control: &ExecutionControl,
+    on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    futures::executor::block_on(
+        execute_workflow_with_providers_with_control_and_progress_async(
+            workflow, providers, control, on_event,
+        ),
+    )
+}
+
+pub async fn execute_workflow_with_providers_with_control_and_progress_async(
+    workflow: &WorkflowFile,
+    providers: &ProviderRegistry,
+    control: &ExecutionControl,
+    mut on_event: impl FnMut(NodeExecutionEvent),
+) -> Result<SimpleExecutionResult, SimpleExecutionError> {
+    execute_workflow_inner(workflow, providers, control, &mut on_event).await
 }
 
 async fn execute_workflow_inner(
     workflow: &WorkflowFile,
     providers: &ProviderRegistry,
     control: &ExecutionControl,
+    on_event: ExecutionProgressCallback<'_>,
 ) -> Result<SimpleExecutionResult, SimpleExecutionError> {
     let mut workflow = workflow.clone();
     let order = execution_order(&workflow)?;
@@ -224,11 +309,18 @@ async fn execute_workflow_inner(
             .ok_or_else(|| SimpleExecutionError::MissingNode(node_id.clone()))?;
         let node_type = workflow.nodes[index].node_type.title().to_string();
         if control.is_cancelled() {
-            mark_node_cancelled(&mut workflow.nodes[index], &mut report, node_id, node_type);
+            mark_node_cancelled(
+                &mut workflow.nodes[index],
+                &mut report,
+                on_event,
+                node_id,
+                node_type,
+            );
             continue;
         }
         push_report_event(
             &mut report,
+            on_event,
             node_id.clone(),
             node_type.clone(),
             NodeStatusWire::Loading,
@@ -243,6 +335,7 @@ async fn execute_workflow_inner(
             );
             push_report_event(
                 &mut report,
+                on_event,
                 node_id,
                 node_type,
                 NodeStatusWire::Skipped,
@@ -262,6 +355,7 @@ async fn execute_workflow_inner(
         }
         push_report_event(
             &mut report,
+            on_event,
             node_id,
             node_type,
             outcome.status,
@@ -274,29 +368,40 @@ async fn execute_workflow_inner(
 
 fn push_report_event(
     report: &mut SimpleExecutionReport,
+    on_event: ExecutionProgressCallback<'_>,
     node_id: String,
     node_type: String,
     status: NodeStatusWire,
     message: impl Into<String>,
 ) {
-    report.events.push(NodeExecutionEvent {
+    let event = NodeExecutionEvent {
         node_id,
         node_type,
         status,
         message: message.into(),
-    });
+    };
+    report.events.push(event.clone());
+    on_event(event);
 }
 
 fn mark_node_cancelled(
     node: &mut WorkflowNode,
     report: &mut SimpleExecutionReport,
+    on_event: ExecutionProgressCallback<'_>,
     node_id: String,
     node_type: String,
 ) {
     let message = "Node skipped because workflow execution was cancelled.";
     set_status(node, NodeStatusWire::Skipped);
     set_data_field(node, "error", json!(message));
-    push_report_event(report, node_id, node_type, NodeStatusWire::Skipped, message);
+    push_report_event(
+        report,
+        on_event,
+        node_id,
+        node_type,
+        NodeStatusWire::Skipped,
+        message,
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -1179,6 +1284,49 @@ mod tests {
     }
 
     #[test]
+    fn progress_callback_receives_the_same_events_as_final_report() {
+        let workflow = WorkflowFile {
+            name: "progress callback".to_string(),
+            nodes: vec![
+                WorkflowNode::new(
+                    "prompt",
+                    NodeType::Prompt,
+                    Position { x: 0.0, y: 0.0 },
+                    json!({"text":"hello"}),
+                ),
+                WorkflowNode::new(
+                    "output",
+                    NodeType::Output,
+                    Position { x: 100.0, y: 0.0 },
+                    json!({}),
+                ),
+            ],
+            edges: vec![WorkflowEdge::new("e1", "prompt", "output")],
+            ..WorkflowFile::blank()
+        };
+        let mut streamed_events = Vec::new();
+
+        let result = execute_simple_workflow_with_progress(&workflow, |event| {
+            streamed_events.push(event);
+        })
+        .expect("executes");
+
+        assert_eq!(streamed_events, result.report.events);
+        assert_eq!(
+            streamed_events
+                .iter()
+                .map(|event| (event.node_id.as_str(), event.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("prompt", NodeStatusWire::Loading),
+                ("prompt", NodeStatusWire::Complete),
+                ("output", NodeStatusWire::Loading),
+                ("output", NodeStatusWire::Complete),
+            ]
+        );
+    }
+
+    #[test]
     fn cancelled_before_execution_skips_every_node_without_starting() {
         let workflow = WorkflowFile {
             name: "cancel before start".to_string(),
@@ -1201,15 +1349,20 @@ mod tests {
         };
         let control = ExecutionControl::new();
         control.cancel();
+        let mut streamed_events = Vec::new();
 
         let result =
-            execute_simple_workflow_with_control(&workflow, &control).expect("execution cancels");
+            execute_simple_workflow_with_control_and_progress(&workflow, &control, |event| {
+                streamed_events.push(event);
+            })
+            .expect("execution cancels");
 
         assert_eq!(result.report.loading_count(), 0);
         assert_eq!(result.report.executed_count(), 0);
         assert_eq!(result.report.skipped_count(), 2);
         assert_eq!(result.report.error_count(), 0);
         assert_eq!(result.report.summary(), "0 complete, 2 skipped, 0 errors");
+        assert_eq!(streamed_events, result.report.events);
         assert!(
             result
                 .report

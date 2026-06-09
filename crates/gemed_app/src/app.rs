@@ -12,8 +12,9 @@ use gemed_core::{
     split_grid_child_sets, target_handle_options, toggle_group_lock, toggle_node_selection,
 };
 use gemed_executor::{
-    ExecutionControl, SimpleExecutionReport, execute_simple_workflow_with_control_async,
-    execute_workflow_with_providers_with_control_async, execution_order,
+    ExecutionControl, SimpleExecutionReport,
+    execute_simple_workflow_with_control_and_progress_async,
+    execute_workflow_with_providers_with_control_and_progress_async, execution_order,
 };
 use gemed_media::{MediaKind, MediaPreview, media_previews_for_node, workflow_media_summary};
 #[cfg(all(feature = "desktop", feature = "providers-http"))]
@@ -438,10 +439,18 @@ fn Header(
                             let current = workflow.read().clone();
                             let control = ExecutionControl::new();
                             active_execution.set(Some(control.clone()));
-                            execution_report.set(None);
+                            execution_report.set(Some(SimpleExecutionReport::default()));
                             message.set(Message::ok("Local executor started."));
 
-                            match execute_simple_workflow_with_control_async(&current, &control).await {
+                            let mut progress_report = SimpleExecutionReport::default();
+                            match execute_simple_workflow_with_control_and_progress_async(
+                                &current,
+                                &control,
+                                |event| {
+                                    progress_report.events.push(event);
+                                    execution_report.set(Some(progress_report.clone()));
+                                },
+                            ).await {
                                 Ok(result) => {
                                     let summary = result.report.summary();
                                     let cancelled = control.is_cancelled();
@@ -489,11 +498,21 @@ fn Header(
                                 .sentence();
                             let control = ExecutionControl::new();
                             active_execution.set(Some(control.clone()));
-                            execution_report.set(None);
+                            execution_report.set(Some(SimpleExecutionReport::default()));
                             message.set(Message::ok(format!("Provider run started. {provider_summary}")));
 
                             match build_provider_registry(&active_provider_config) {
-                                Ok(providers) => match execute_workflow_with_providers_with_control_async(&current, &providers, &control).await {
+                                Ok(providers) => {
+                                    let mut progress_report = SimpleExecutionReport::default();
+                                    match execute_workflow_with_providers_with_control_and_progress_async(
+                                        &current,
+                                        &providers,
+                                        &control,
+                                        |event| {
+                                            progress_report.events.push(event);
+                                            execution_report.set(Some(progress_report.clone()));
+                                        },
+                                    ).await {
                                 Ok(result) => {
                                     let summary = result.report.summary();
                                     let cancelled = control.is_cancelled();
@@ -520,7 +539,8 @@ fn Header(
                                     active_execution.set(None);
                                     message.set(Message::err(format!("Provider run failed: {err}")));
                                 }
-                                },
+                                    }
+                                }
                                 Err(err) => {
                                     execution_report.set(None);
                                     active_execution.set(None);

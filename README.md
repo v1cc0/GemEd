@@ -27,7 +27,7 @@ Implemented now:
 - Node-card media preview foundation that detects common inline/reference media fields, renders size-guarded image/audio/video/GLB previews, exposes Open/Download/Copy URI links, supports an in-app image/audio/video/GLB media overlay, and flags project-reference hydration/capture gaps honestly
 - Header action to load the built-in Media Sample and exercise the JSON import/export → node-card preview path without external provider calls
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
-- Execution spine panel, Run Local action for pure-Rust workflow smoke runs, Run Providers action for configured provider-trait smoke runs, and per-node loading → terminal execution events for progress/status visibility
+- Execution spine panel, Run Local action for pure-Rust workflow smoke runs, Run Providers action for configured provider-trait smoke runs, and streamed per-node loading → terminal execution events for progress/status visibility while runs are active
 - Executor cancellation-control foundation with backward-compatible APIs, header `Cancel Run` UI wiring for active local/provider runs, and tests for pre-run cancellation plus downstream skip behavior after a provider-triggered cancel
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
