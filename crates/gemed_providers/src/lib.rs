@@ -569,6 +569,8 @@ pub enum ProviderError {
     UnsupportedCapability(String, &'static str),
     #[error("provider request is invalid: {0}")]
     InvalidRequest(String),
+    #[error("provider secret is missing: {0}")]
+    MissingSecret(String),
     #[error("provider request failed: {0}")]
     RequestFailed(String),
 }
@@ -635,6 +637,16 @@ impl ProviderRegistry {
         let mut registry = Self::new();
         for id in mock_provider_ids() {
             registry.register(MockProvider::new(id));
+        }
+        registry
+    }
+
+    pub fn mock_from_config(config: &ProviderConfigSet) -> Self {
+        let mut registry = Self::new();
+        for provider in &config.providers {
+            if provider.enabled && provider.runtime_mode == ProviderRuntimeMode::Mock {
+                registry.register(MockProvider::new(provider.id.clone()));
+            }
         }
         registry
     }
@@ -819,6 +831,267 @@ impl Model3dProvider for MockProvider {
     }
 }
 
+#[cfg(feature = "http")]
+#[derive(Clone, Debug)]
+pub struct OpenAiResponsesProvider {
+    api_key: String,
+    endpoint: String,
+    default_model: String,
+}
+
+#[cfg(feature = "http")]
+impl OpenAiResponsesProvider {
+    pub const DEFAULT_ENDPOINT: &'static str = "https://api.openai.com/v1/responses";
+    pub const DEFAULT_MODEL: &'static str = "gpt-5.5";
+
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            endpoint: Self::DEFAULT_ENDPOINT.to_string(),
+            default_model: Self::DEFAULT_MODEL.to_string(),
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = normalize_openai_responses_endpoint(&endpoint.into());
+        self
+    }
+
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        self.default_model = model.into();
+        self
+    }
+
+    pub fn from_config_with_secret<F>(
+        config: &ProviderConfig,
+        resolver: &F,
+    ) -> Result<Option<Self>, ProviderError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if !config.enabled
+            || config.id != ProviderId::OpenAi
+            || config.runtime_mode != ProviderRuntimeMode::DirectDesktop
+        {
+            return Ok(None);
+        }
+
+        let api_key = match &config.secret_source {
+            ProviderSecretSource::Environment { variable } => resolver(variable)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::MissingSecret(format!(
+                        "environment variable `{variable}` is not set"
+                    ))
+                })?,
+            ProviderSecretSource::DesktopKeychain { service, account } => {
+                return Err(ProviderError::MissingSecret(format!(
+                    "desktop keychain `{service}/{account}` resolution is not implemented yet"
+                )));
+            }
+            ProviderSecretSource::None | ProviderSecretSource::WebBackend { .. } => {
+                return Err(ProviderError::MissingSecret(
+                    "OpenAI direct desktop provider requires an environment secret source"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let mut provider = Self::new(api_key);
+        if let Some(base_url) = config.base_url.as_deref() {
+            provider = provider.with_endpoint(base_url);
+        }
+        if let Some(model) = config.default_model.as_deref() {
+            provider = provider.with_default_model(model);
+        }
+        Ok(Some(provider))
+    }
+}
+
+#[cfg(feature = "http")]
+impl ProviderBackend for OpenAiResponsesProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::OpenAi
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ModelCatalog for OpenAiResponsesProvider {
+    async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+        Ok(vec![ProviderModel {
+            provider: ProviderId::OpenAi,
+            model_id: self.default_model.clone(),
+            display_name: self.default_model.clone(),
+            capabilities: vec![ProviderCapability::Llm],
+            pricing: None,
+        }])
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl LlmProvider for OpenAiResponsesProvider {
+    async fn generate_text(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        validate_prompt(&request.prompt)?;
+        let body = openai_responses_request_body(&request);
+        let authorization = format!("Bearer {}", self.api_key);
+        let mut response: Value = ureq::post(&self.endpoint)
+            .header("Authorization", authorization)
+            .header("Accept", "application/json")
+            .send_json(&body)
+            .map_err(openai_transport_error)?
+            .body_mut()
+            .read_json()
+            .map_err(openai_transport_error)?;
+        let text = extract_openai_response_text(&mut response).ok_or_else(|| {
+            ProviderError::RequestFailed("OpenAI response did not contain output text".to_string())
+        })?;
+        Ok(LlmResponse {
+            text,
+            provider: ProviderId::OpenAi,
+            model: request.model,
+        })
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl ImageProvider for OpenAiResponsesProvider {
+    async fn generate_image(&self, _request: ImageRequest) -> Result<ImageResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "image",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl VideoProvider for OpenAiResponsesProvider {
+    async fn generate_video(&self, _request: VideoRequest) -> Result<VideoResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "video",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl AudioProvider for OpenAiResponsesProvider {
+    async fn generate_audio(&self, _request: AudioRequest) -> Result<AudioResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "audio",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait(?Send)]
+impl Model3dProvider for OpenAiResponsesProvider {
+    async fn generate_model3d(
+        &self,
+        _request: Model3dRequest,
+    ) -> Result<Model3dResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            self.id().display_name(),
+            "3D",
+        ))
+    }
+}
+
+#[cfg(feature = "http")]
+fn normalize_openai_responses_endpoint(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return OpenAiResponsesProvider::DEFAULT_ENDPOINT.to_string();
+    }
+    if trimmed.ends_with("/responses") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/responses")
+    }
+}
+
+#[cfg(feature = "http")]
+fn openai_responses_request_body(request: &LlmRequest) -> Value {
+    let model = if request.model.trim().is_empty() {
+        OpenAiResponsesProvider::DEFAULT_MODEL
+    } else {
+        request.model.as_str()
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("model".to_string(), json_value(model));
+    body.insert("input".to_string(), json_value(&request.prompt));
+    if let Some(max_tokens) = request.max_tokens {
+        body.insert(
+            "max_output_tokens".to_string(),
+            serde_json::json!(max_tokens),
+        );
+    }
+    if let Value::Object(parameters) = &request.parameters {
+        for (key, value) in parameters {
+            body.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    Value::Object(body)
+}
+
+#[cfg(feature = "http")]
+fn json_value(value: &str) -> Value {
+    Value::String(value.to_string())
+}
+
+#[cfg(feature = "http")]
+fn openai_transport_error(error: ureq::Error) -> ProviderError {
+    match error {
+        ureq::Error::StatusCode(status) => {
+            ProviderError::RequestFailed(format!("OpenAI API returned HTTP {status}"))
+        }
+        other => ProviderError::RequestFailed(format!("OpenAI API request failed: {other}")),
+    }
+}
+
+#[cfg(feature = "http")]
+fn extract_openai_response_text(value: &mut Value) -> Option<String> {
+    if let Some(text) = value
+        .get("output_text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    let mut parts = Vec::new();
+    let output = value.get_mut("output")?.as_array_mut()?;
+    for item in output {
+        let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for content_item in content {
+            let Some(text) = content_item
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            else {
+                continue;
+            };
+            let item_type = content_item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if item_type.is_empty() || item_type == "output_text" || item_type == "text" {
+                parts.push(text.to_string());
+            }
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn validate_prompt(prompt: &str) -> Result<(), ProviderError> {
     if prompt.trim().is_empty() {
         return Err(ProviderError::InvalidRequest(
@@ -906,6 +1179,23 @@ mod tests {
     }
 
     #[test]
+    fn mock_registry_from_config_registers_only_mock_enabled_providers() {
+        let configs = ProviderConfigSet::new(vec![
+            ProviderConfig::mock(ProviderId::Mock),
+            ProviderConfig::mock(ProviderId::OpenAi),
+            ProviderConfig::disabled(ProviderId::Anthropic),
+            ProviderConfig::direct_desktop_env(ProviderId::Gemini, "GEMINI_API_KEY", None),
+        ]);
+
+        let registry = ProviderRegistry::mock_from_config(&configs);
+
+        assert!(registry.contains(&ProviderId::Mock));
+        assert!(registry.contains(&ProviderId::OpenAi));
+        assert!(!registry.contains(&ProviderId::Anthropic));
+        assert!(!registry.contains(&ProviderId::Gemini));
+    }
+
+    #[test]
     fn desktop_env_defaults_use_expected_secret_names() {
         let configs = ProviderConfigSet::desktop_env_defaults();
 
@@ -990,5 +1280,81 @@ mod tests {
         let sentence = summary.sentence();
         assert!(!sentence.contains("sk-live-secret"));
         assert!(sentence.contains("missing local secrets"));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn openai_responses_body_maps_llm_request() {
+        let body = openai_responses_request_body(&LlmRequest {
+            provider: ProviderId::OpenAi,
+            model: "gpt-test".to_string(),
+            prompt: "hello".to_string(),
+            input_images: Vec::new(),
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+            parameters: serde_json::json!({
+                "text": {
+                    "verbosity": "low"
+                }
+            }),
+        });
+
+        assert_eq!(body["model"], "gpt-test");
+        assert_eq!(body["input"], "hello");
+        assert_eq!(body["max_output_tokens"], 64);
+        assert_eq!(body["text"]["verbosity"], "low");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn openai_response_text_extracts_flat_and_nested_shapes() {
+        let mut flat = serde_json::json!({
+            "output_text": "flat response"
+        });
+        assert_eq!(
+            extract_openai_response_text(&mut flat),
+            Some("flat response".to_string())
+        );
+
+        let mut nested = serde_json::json!({
+            "output": [
+                {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "nested response"
+                        }
+                    ]
+                }
+            ]
+        });
+        assert_eq!(
+            extract_openai_response_text(&mut nested),
+            Some("nested response".to_string())
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn openai_provider_from_config_resolves_env_secret_without_leaking_it() {
+        let config = ProviderConfig::direct_desktop_env(
+            ProviderId::OpenAi,
+            "OPENAI_API_KEY",
+            Some("gpt-test".to_string()),
+        );
+
+        let provider = OpenAiResponsesProvider::from_config_with_secret(&config, &|name| {
+            (name == "OPENAI_API_KEY").then(|| "sk-test-secret".to_string())
+        })
+        .expect("config resolves")
+        .expect("provider created");
+
+        assert_eq!(provider.default_model, "gpt-test");
+        assert_eq!(
+            OpenAiResponsesProvider::from_config_with_secret(&config, &|_| None::<String>)
+                .expect_err("missing secret rejected")
+                .to_string(),
+            "provider secret is missing: environment variable `OPENAI_API_KEY` is not set"
+        );
     }
 }

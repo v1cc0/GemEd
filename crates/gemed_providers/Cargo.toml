@@ -11,6 +11,11 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ureq = { workspace = true, optional = true, features = ["json"] }
+
+[features]
+default = []
+http = ["dep:ureq"]
 
 [dev-dependencies]
 futures.workspace = true

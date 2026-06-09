@@ -18,10 +18,11 @@ Implemented now:
 - SVG/HTML canvas rendering nodes and edges
 - Basic Canvas MVP controls: select/multi-select/drag/nudge nodes, create groups from selection or Shift-drag box selection, grouped node backgrounds with lock/unlock, drag-to-move group headers, sidebar resize controls, direct canvas group resize handles, sidebar and direct wheel/blank-canvas pan/zoom/reset viewport controls, visual handle-to-handle connect, connect selected node to the next node, visual edge removal, undo, and redo
 - Provider trait boundary with deterministic mock providers for LLM/image/video/audio/3D generation nodes
+- Optional desktop OpenAI Responses API LLM backend behind the `providers-http` feature and `OPENAI_API_KEY`; normal builds keep network/provider calls out unless explicitly enabled
 - Provider configuration boundary with explicit runtime modes (`mock`, `directDesktop`, `webBackend`, `disabled`) and secret sources; desktop env var names are modeled without storing secret values in app state
 - Provider settings panel with platform/mock defaults, per-provider mode toggles, and provider-config save/load through desktop filesystem or web localStorage without raw API-key persistence
 - Storage trait boundary with in-memory, browser localStorage, and desktop filesystem implementations
-- Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Mocks action for provider-trait smoke runs without secrets
+- Execution spine panel, Run Local action for pure-Rust workflow smoke runs, and Run Providers action for configured provider-trait smoke runs
 - Save Slot / Load Slot actions backed by platform storage (`localStorage` on web, app data JSON files on desktop)
 - Desktop-only native Open File / Save As actions for workflow JSON files
 - Desktop-only project directory Open Project / Save Project actions using `gemed-project.json`, `workflow.json`, and `media/`, with known media fields saved through companion `*Ref` fields, generic data URL fallback externalization, stale manifest-tracked media cleanup, and media hydration on load
@@ -31,7 +32,7 @@ Implemented now:
 Not implemented yet:
 
 - Full editable canvas UX: polished drag/handle affordances
-- Live Provider/API execution beyond mock providers
+- Broader live Provider/API execution beyond the opt-in OpenAI LLM desktop path
 - Provider secret entry, OS keychain persistence, and web backend/server-function execution
 - Media/video/3D nodes
 - Media storage polish: richer media capability handling and node-specific media UI affordances
@@ -65,11 +66,20 @@ dx serve --web --no-default-features --features web --open false
 dx serve --desktop --features desktop
 ```
 
+To opt into the experimental desktop OpenAI LLM backend:
+
+```bash
+OPENAI_API_KEY=... dx serve --desktop --features desktop,providers-http
+```
+
+In the app, set OpenAI to the platform/env mode in Provider Settings and run an LLM node with provider `openai`. The regular desktop and web commands do not include live provider HTTP clients.
+
 For release-style build artifacts:
 
 ```bash
 dx build --web --no-default-features --features web
 dx build --desktop --features desktop
+dx build --desktop --features desktop,providers-http
 ```
 
 On Windows, run the desktop build command from a Windows machine/runner.
@@ -81,6 +91,7 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets --features desktop -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features --features web -- -D warnings
+cargo clippy --workspace --all-targets --features desktop,providers-http -- -D warnings
 ```
 
 CI mirrors these gates and runs a Dioxus build matrix for web, Linux desktop, and Windows desktop in `.github/workflows/ci.yml`.

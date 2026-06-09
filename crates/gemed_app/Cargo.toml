@@ -21,4 +21,5 @@ web-sys = { workspace = true, optional = true, features = ["HtmlTextAreaElement"
 default = ["desktop"]
 web = ["dioxus/web", "gemed_storage/web", "dep:wasm-bindgen", "dep:web-sys"]
 desktop = ["dioxus/desktop", "gemed_storage/desktop", "dep:rfd"]
+providers-http = ["gemed_providers/http"]
 bundle = []

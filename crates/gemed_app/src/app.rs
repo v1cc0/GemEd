@@ -14,6 +14,8 @@ use gemed_executor::{
     SimpleExecutionReport, execute_simple_workflow, execute_workflow_with_providers,
     execution_order,
 };
+#[cfg(all(feature = "desktop", feature = "providers-http"))]
+use gemed_providers::OpenAiResponsesProvider;
 use gemed_providers::{
     ProviderCapability, ProviderConfig, ProviderConfigSet, ProviderId, ProviderRegistry,
     ProviderRuntimeMode,
@@ -179,7 +181,7 @@ pub fn App() -> Element {
     rsx! {
         style { "{APP_CSS}" }
         div { class: "app",
-            Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft }
+            Header { workflow, json_text, message, execution_report, undo_stack, drag_state, connection_draft, provider_config }
             main { class: "main",
                 Sidebar { workflow, json_text, message, execution_report, undo_stack, viewport, connection_draft, provider_config }
                 WorkflowCanvas { workflow, json_text, message, undo_stack, drag_state, pan_state, group_resize_state, group_move_state, group_selection_state, viewport, connection_draft }
@@ -197,6 +199,7 @@ fn Header(
     mut undo_stack: Signal<WorkflowUndoStack>,
     mut drag_state: Signal<Option<DragState>>,
     mut connection_draft: Signal<Option<ConnectionDraft>>,
+    provider_config: Signal<ProviderConfigSet>,
 ) -> Element {
     rsx! {
         header { class: "header",
@@ -295,30 +298,37 @@ fn Header(
                     class: "action",
                     onclick: move |_| {
                         let current = workflow.read().clone();
-                        let provider_config = ProviderConfigSet::mock_all();
-                        let provider_summary = provider_config.summary_with(|_| None::<String>).sentence();
-                        let providers = ProviderRegistry::mock_all();
-                        match execute_workflow_with_providers(&current, &providers) {
+                        let active_provider_config = provider_config.read().clone();
+                        let provider_summary = active_provider_config
+                            .summary_with(provider_secret_env_value)
+                            .sentence();
+                        match build_provider_registry(&active_provider_config) {
+                            Ok(providers) => match execute_workflow_with_providers(&current, &providers) {
                             Ok(result) => {
                                 let summary = result.report.summary();
                                 match result.workflow.to_pretty_json() {
                                     Ok(json) => json_text.set(json),
-                                    Err(err) => message.set(Message::err(format!("Executed with mocks but failed to export JSON: {err}"))),
+                                    Err(err) => message.set(Message::err(format!("Executed with providers but failed to export JSON: {err}"))),
                                 }
                                 workflow.set(result.workflow);
                                 execution_report.set(Some(result.report));
                                 undo_stack.write().clear();
                                 drag_state.set(None);
                                 connection_draft.set(None);
-                                message.set(Message::ok(format!("Mock provider run finished: {summary}. {provider_summary}")));
+                                message.set(Message::ok(format!("Provider run finished: {summary}. {provider_summary}")));
                             }
                             Err(err) => {
                                 execution_report.set(None);
-                                message.set(Message::err(format!("Mock provider run failed: {err}")));
+                                message.set(Message::err(format!("Provider run failed: {err}")));
+                            }
+                            },
+                            Err(err) => {
+                                execution_report.set(None);
+                                message.set(Message::err(format!("Provider registry failed: {err}")));
                             }
                         }
                     },
-                    "Run Mocks"
+                    "Run Providers"
                 }
                 button {
                     class: "action",
@@ -970,7 +980,7 @@ fn Sidebar(
                         }
                     }
                 } else {
-                    p { "Run Local executes pure Rust prompt/array/output/control nodes and explicitly skips unregistered providers. Run Mocks wires mock provider traits for generation/LLM smoke tests without secrets." }
+                    p { "Run Local executes pure Rust prompt/array/output/control nodes and skips unregistered providers. Run Providers wires the configured provider registry; mock mode stays offline, and live desktop HTTP providers require explicit feature/env opt-in." }
                     p { "{mock_provider_summary}" }
                 }
             }
@@ -2480,6 +2490,60 @@ fn save_provider_settings(
 
 fn load_provider_settings() -> Result<ProviderConfigSet, gemed_storage::StorageError> {
     platform_storage()?.load_provider_config(DEFAULT_PROVIDER_CONFIG_SLOT)
+}
+
+fn build_provider_registry(config: &ProviderConfigSet) -> Result<ProviderRegistry, String> {
+    let mut registry = ProviderRegistry::mock_from_config(config);
+    register_platform_provider_backends(config, &mut registry)?;
+    Ok(registry)
+}
+
+#[cfg(all(feature = "desktop", feature = "providers-http"))]
+fn register_platform_provider_backends(
+    config: &ProviderConfigSet,
+    registry: &mut ProviderRegistry,
+) -> Result<(), String> {
+    for provider in &config.providers {
+        if provider.id != ProviderId::OpenAi
+            || provider.runtime_mode != ProviderRuntimeMode::DirectDesktop
+        {
+            continue;
+        }
+        match OpenAiResponsesProvider::from_config_with_secret(provider, &provider_secret_env_value)
+        {
+            Ok(Some(backend)) => registry.register(backend),
+            Ok(None) => {}
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(all(feature = "desktop", feature = "providers-http")))]
+fn register_platform_provider_backends(
+    config: &ProviderConfigSet,
+    _registry: &mut ProviderRegistry,
+) -> Result<(), String> {
+    let live_candidates = config
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider.enabled
+                && !matches!(
+                    provider.runtime_mode,
+                    ProviderRuntimeMode::Mock | ProviderRuntimeMode::Disabled
+                )
+        })
+        .map(|provider| provider.id.display_name())
+        .collect::<Vec<_>>();
+    if live_candidates.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "live provider backend feature is not enabled for: {}",
+            live_candidates.join(", ")
+        ))
+    }
 }
 
 #[cfg(feature = "desktop")]
